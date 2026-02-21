@@ -15,33 +15,27 @@ haskell-language-server-wrapper --version
 echo "Verifying system utilities..."
 for cmd in make gcc curl git psql pkg-config direnv socat ps; do
     if ! command -v $cmd &> /dev/null; then
-        echo "ERROR: $cmd is not installed!"
+        echo "❌ $cmd is not installed!"
         exit 1
     fi
-    echo "✓ $cmd is installed"
+    echo "✅ $cmd is installed."
 done
 
 # Create a welcome message
 echo "Creating welcome message..."
-cat > /home/vscode/.welcome_message << 'EOF'
-
-=======================================================
- Welcome to the Jarvis project development container!
-=======================================================
+cat > /home/vscode/.welcome_message << EOF
+🖥️ Welcome to the Jarvis project development container!
 
 This container has been set up with:
- - GHC 9.6.7
- - Cabal 3.10.3.0
- - All required system dependencies (libpq, etc.)
+- GHC 9.6.7
+- Cabal 3.10.3.0
+- HLS 2.12.0.0
+- Required system dependencies (make, gcc, curl, git, psql, pkg-config, direnv, socat, ps)
 
-To start the database:    (Already running via Compose!)
-To access the database:   psql -h db -U postgres -d jarvis
-
+To access the database: psql -h db -U postgres -d jarvis
 EOF
 
 # Add welcome message to bashrc so it prints on new terminals
-if ! grep -q ".welcome_message" /home/vscode/.bashrc; then
-    echo '[[ $- == *i* ]] && cat /home/vscode/.welcome_message' >> /home/vscode/.bashrc
-fi
+echo "echo -e \"\$(cat /home/vscode/.welcome_message)\"" >> /home/vscode/.bashrc
 
 echo "Post-creation setup complete!"

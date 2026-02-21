@@ -3,10 +3,29 @@
   "dockerComposeFile": "docker-compose.yml",
   "service": "app",
   "workspaceFolder": "/workspaces/jarvis",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "haskell.haskell",
+        "justusadam.language-haskell",
+        "mkhl.direnv",
+        "usernamehw.errorlens",
+        "editorconfig.editorconfig",
+        "mtxr.sqltools",
+        "mtxr.sqltools-driver-pg"
+      ],
+      "settings": {
+        "haskell.manageHLS": "GHCup",
+        "haskell.ghcupExecutablePath": "/home/vscode/.ghcup/bin/ghcup",
+        "editor.formatOnSave": true,
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
   "forwardPorts": [
     5432
   ],
-  "postCreateCommand": "chmod +x .devcontainer/post-create.sh 2>/dev/null || true && .devcontainer/post-create.sh",
+  "postCreateCommand": ".devcontainer/post-create.sh",
   "remoteUser": "vscode",
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {
