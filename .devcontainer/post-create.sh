@@ -32,7 +32,9 @@ This container has been set up with:
 - HLS 2.12.0.0
 - Required system dependencies (make, gcc, curl, git, psql, pkg-config, direnv, socat, ps)
 
-To access the database: psql -h db -U postgres -d jarvis
+To access the database, you can run the following command, or access it directly via SQLTools plugin:
+
+psql -h db -U postgres -d jarvis
 EOF
 
 # Add welcome message to bashrc so it prints on new terminals
