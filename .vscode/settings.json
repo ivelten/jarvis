@@ -1,15 +1,15 @@
 {
-    "sqltools.connections": [
-        {
-            "ssh": "Disabled",
-            "previewLimit": 50,
-            "server": "db",
-            "port": 5432,
-            "askForPassword": true,
-            "driver": "PostgreSQL",
-            "name": "Jarvis",
-            "database": "jarvis",
-            "username": "postgres"
-        }
-    ]
+  "sqltools.connections": [
+    {
+      "ssh": "Disabled",
+      "previewLimit": 50,
+      "server": "db",
+      "port": 5432,
+      "driver": "PostgreSQL",
+      "name": "Jarvis",
+      "database": "jarvis",
+      "username": "postgres",
+      "password": "postgres"
+    }
+  ]
 }
