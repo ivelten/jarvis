@@ -1,0 +1,40 @@
+# Build artifacts
+dist/
+dist-*
+cabal-dev/
+*.o
+*.hi
+*.hie
+*.chi
+*.chs.h
+*.dyn_o
+*.dyn_hi
+.hpc
+.hsenv
+.cabal-sandbox/
+cabal.sandbox.config
+cabal.project.local
+cabal.project.local~
+cabal.project.rescan
+.ghc.environment.*
+
+# Haskell Language Server files
+.stack-work/
+.hie/
+.cabal/
+
+# VS Code/Antigravity
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+.history/
+
+# System / OS
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+
+# Database/Docker
+postgres-data/

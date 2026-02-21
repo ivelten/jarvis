@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    # Keeps the container running
+    command: /bin/sh -c "while sleep 1000; do :; done"
+    volumes:
+      # Mount your workspace
+      - ..:/workspaces/jarvis:cached
+    depends_on:
+      - db
+
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: jarvis
+    volumes:
+      # Keep database data alive between rebuilds
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data:
