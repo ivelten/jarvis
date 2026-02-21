@@ -1,18 +1,18 @@
 {
-    "name": "Jarvis Haskell Development",
-    "dockerComposeFile": "docker-compose.yml",
-    "service": "app",
-    "workspaceFolder": "/workspaces/jarvis",
-    "forwardPorts": [
-        5432
-    ],
-    "postCreateCommand": "chmod +x .devcontainer/post-create.sh 2>/dev/null || true && .devcontainer/post-create.sh",
-    "remoteUser": "vscode",
-    "features": {
-        "ghcr.io/devcontainers/features/common-utils:2": {
-            "installZsh": true,
-            "configureZshAsDefaultShell": false,
-            "installOhMyZsh": false
-        }
+  "name": "Jarvis Haskell Development",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/jarvis",
+  "forwardPorts": [
+    5432
+  ],
+  "postCreateCommand": "chmod +x .devcontainer/post-create.sh 2>/dev/null || true && .devcontainer/post-create.sh",
+  "remoteUser": "vscode",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "configureZshAsDefaultShell": false,
+      "installOhMyZsh": false
     }
+  }
 }
