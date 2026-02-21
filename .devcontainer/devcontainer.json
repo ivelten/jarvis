@@ -8,6 +8,7 @@
       "extensions": [
         "haskell.haskell",
         "justusadam.language-haskell",
+        "eriksik2.vscode-ghci",
         "mkhl.direnv",
         "usernamehw.errorlens",
         "editorconfig.editorconfig",
