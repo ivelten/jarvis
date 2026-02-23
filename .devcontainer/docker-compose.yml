@@ -12,7 +12,7 @@ services:
       - db
 
   db:
-    image: postgres:17
+    image: postgres:18.2
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
@@ -20,7 +20,7 @@ services:
       POSTGRES_DB: jarvis
     volumes:
       # Keep database data alive between rebuilds
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql
 
 volumes:
   postgres-data:
