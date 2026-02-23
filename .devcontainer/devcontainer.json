@@ -13,7 +13,9 @@
         "usernamehw.errorlens",
         "editorconfig.editorconfig",
         "mtxr.sqltools",
-        "mtxr.sqltools-driver-pg"
+        "mtxr.sqltools-driver-pg",
+        "yzhang.markdown-all-in-one",
+        "davidanson.vscode-markdownlint"
       ],
       "settings": {
         "haskell.manageHLS": "GHCup",
