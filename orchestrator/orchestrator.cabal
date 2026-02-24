@@ -15,12 +15,10 @@ category: Application
 build-type: Simple
 extra-doc-files: ../CHANGELOG.md
 extra-source-files:
-  sql/add_interest_score_check.sql
-  sql/create_comment_author.sql
-  sql/create_content_status.sql
-  sql/create_draft_status.sql
-  sql/create_status_indexes.sql
-  sql/create_updated_at_trigger.sql
+  sql/constraints/*.sql
+  sql/indexes/*.sql
+  sql/triggers/*.sql
+  sql/types/*.sql
 
 common common-deps
   build-depends:

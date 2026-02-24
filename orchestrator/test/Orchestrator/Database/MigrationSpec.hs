@@ -52,11 +52,39 @@ spec = do
 
     it "creates updated_at triggers" $ do
       triggers <- getPgTriggers pool
-      triggers `shouldContain` ["set_post_draft_updated_at", "set_raw_content_updated_at", "set_subject_updated_at"]
+      triggers
+        `shouldContain` [ "set_post_draft_updated_at",
+                          "set_raw_content_updated_at",
+                          "set_subject_updated_at"
+                        ]
+
+    it "creates created_at immutability triggers" $ do
+      triggers <- getPgTriggers pool
+      triggers
+        `shouldContain` [ "preserve_ai_analysis_analyzed_at",
+                          "preserve_post_draft_created_at",
+                          "preserve_raw_content_created_at",
+                          "preserve_review_comment_created_at",
+                          "preserve_subject_created_at"
+                        ]
 
     it "creates status indexes" $ do
       indexes <- getPgIndexes pool
-      indexes `shouldContain` ["idx_post_draft_status", "idx_raw_content_status"]
+      indexes `shouldContain` ["idx_post_draft_status"]
+      indexes `shouldContain` ["idx_raw_content_status"]
+
+    it "creates FK indexes on child table columns" $ do
+      indexes <- getPgIndexes pool
+      indexes `shouldContain` ["idx_ai_analysis_draft_id"]
+      indexes `shouldContain` ["idx_post_draft_source_content_id"]
+      indexes `shouldContain` ["idx_post_draft_source_draft_id"]
+      indexes `shouldContain` ["idx_post_draft_subject_id"]
+      indexes `shouldContain` ["idx_raw_content_subject_id"]
+      indexes `shouldContain` ["idx_review_comment_draft_id"]
+
+    it "creates partial unique index on post_draft.discord_thread_id" $ do
+      indexes <- getPgIndexes pool
+      indexes `shouldContain` ["idx_post_draft_discord_thread_id"]
 
   describe "ContentStatus persistence" $
     before_ (truncateTestTables pool) $ do

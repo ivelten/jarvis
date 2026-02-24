@@ -10,8 +10,9 @@ import Database.Persist.Sql
   ( Entity (..),
     SqlPersistT,
     getBy,
-    insertMany_,
     selectList,
+    upsertBy,
+    (=.),
     (==.),
   )
 import Orchestrator.AI.Client (AiConfig, DiscoveredContent (..), discoverContent)
@@ -24,8 +25,20 @@ ingestDiscoveredContent aiCfg = do
   discovered <- liftIO $ discoverContent aiCfg
   now <- liftIO getCurrentTime
   rows <- mapM (toRawContent now) discovered
-  insertMany_ rows
+  mapM_ upsertRow rows
   where
+    -- \| Insert a newly discovered URL, or refresh its metadata if it already
+    -- exists.  The triage fields (@status@, @rejectionReason@) are left
+    -- untouched on a conflict so that human decisions are never overwritten.
+    upsertRow rc =
+      upsertBy
+        (UniqueContentUrl (rawContentUrl rc))
+        rc
+        [ RawContentTitle =. rawContentTitle rc,
+          RawContentSummary =. rawContentSummary rc,
+          RawContentSubjectId =. rawContentSubjectId rc,
+          RawContentUpdatedAt =. rawContentUpdatedAt rc
+        ]
     toRawContent now dc = do
       mSubject <- case dcSubject dc of
         Nothing -> pure Nothing
