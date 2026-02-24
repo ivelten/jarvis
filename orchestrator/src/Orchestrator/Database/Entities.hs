@@ -30,9 +30,9 @@ share
 -- | A curated subject of interest for the blog.
 -- The interest score controls how eagerly new content on this subject is drafted.
 Subject
-  name          Text          -- e.g. "concurrency", "type system"
+  name          Text
   description   Text Maybe
-  interestScore InterestScore -- 1 (low) – 5 (high); curated by the user
+  interestScore InterestScore
   createdAt     UTCTime
   updatedAt     UTCTime
   UniqueSubjectName name
@@ -43,8 +43,8 @@ RawContent
   title           Text
   url             Text
   summary         Text
-  rawHtml         Text Maybe  -- archived page HTML; preserved in case the original URL goes dead
-  subjectId       SubjectId Maybe  -- matched to a known Subject by name at ingest time
+  rawHtml         Text Maybe
+  subjectId       SubjectId Maybe
   status          ContentStatus
   rejectionReason Text Maybe
   createdAt       UTCTime
@@ -56,11 +56,11 @@ RawContent
 -- The actual Markdown body lives in the Git branch; only metadata is stored here.
 PostDraft
   title            Text
-  gitBranch        Text       -- e.g. "draft/haskell-everyday-2025-02-24"
+  gitBranch        Text
   subjectId        SubjectId Maybe
-  suggestedTags    TagList    -- PostgreSQL text[]
+  suggestedTags    TagList
   status           DraftStatus
-  discordThreadId  Text Maybe -- Forum thread ID; set when the bot creates the review thread
+  discordThreadId  Text Maybe
   publishedAt      UTCTime Maybe
   publishedUrl     Text Maybe
   createdAt        UTCTime
