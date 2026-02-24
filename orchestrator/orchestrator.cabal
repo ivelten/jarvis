@@ -92,12 +92,13 @@ executable orchestrator
 test-suite orchestrator-test
   import: common-deps
   type: exitcode-stdio-1.0
-  main-is: Spec.hs
+  main-is: Main.hs
   hs-source-dirs: test
   other-modules:
     Orchestrator.Database.MigrationSpec
     Orchestrator.Database.ModelsSpec
     Orchestrator.Posts.GeneratorSpec
+    Spec
     TestHelpers
 
   build-depends:
@@ -108,6 +109,7 @@ test-suite orchestrator-test
     orchestrator,
     persistent >=2.14,
     persistent-postgresql >=2.13,
+    postgresql-simple >=0.6,
 
   ghc-options:
     -threaded
