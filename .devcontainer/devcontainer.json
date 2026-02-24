@@ -21,7 +21,7 @@
         "haskell.manageHLS": "GHCup",
         "haskell.ghcupExecutablePath": "/home/vscode/.ghcup/bin/ghcup",
         "editor.formatOnSave": true,
-        "terminal.integrated.defaultProfile.linux": "bash"
+        "terminal.integrated.defaultProfile.linux": "zsh"
       }
     }
   },
@@ -33,7 +33,7 @@
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {
       "installZsh": true,
-      "configureZshAsDefaultShell": false,
+      "configureZshAsDefaultShell": true,
       "installOhMyZsh": false
     }
   }

@@ -37,7 +37,7 @@ To access the database, you can run the following command, or access it directly
 psql -h db -U postgres -d jarvis
 EOF
 
-# Add welcome message to bashrc so it prints on new terminals
-echo "echo -e \"\$(cat /home/vscode/.welcome_message)\"" >> /home/vscode/.bashrc
+# Add welcome message to zshrc so it prints on new terminals
+echo "echo -e \"\$(cat /home/vscode/.welcome_message)\"" >> /home/vscode/.zshrc
 
 echo "Post-creation setup complete!"

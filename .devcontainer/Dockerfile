@@ -39,7 +39,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | \
     sh
 
 # Hook direnv
-RUN echo 'eval "$(direnv hook bash)"' >> ~/.bashrc
+RUN echo 'eval "$(direnv hook bash)"' >> ~/.bashrc && \
+    echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
 
 # Installs and configures HLS
 RUN ghcup install hls 2.12.0.0 --set
