@@ -20,7 +20,7 @@ import Database.Persist.TH
     share,
     sqlSettings,
   )
-import Orchestrator.Database.Models (CommentAuthor, ContentStatus, DraftStatus, TagList)
+import Orchestrator.Database.Models (CommentAuthor, ContentStatus, DraftStatus, InterestScore, TagList)
 
 -- | All database entities for the orchestrator.
 share
@@ -32,7 +32,7 @@ share
 Subject
   name          Text          -- e.g. "concurrency", "type system"
   description   Text Maybe
-  interestScore Int           -- 1 (low) – 5 (high); curated by the user
+  interestScore InterestScore -- 1 (low) – 5 (high); curated by the user
   createdAt     UTCTime
   updatedAt     UTCTime
   UniqueSubjectName name

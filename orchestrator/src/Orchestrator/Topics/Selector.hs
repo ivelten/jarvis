@@ -29,7 +29,7 @@ ingestDiscoveredContent aiCfg = do
     toRawContent now dc = do
       mSubject <- case dcSubject dc of
         Nothing -> pure Nothing
-        Just name -> fmap (fmap entityKey) $ getBy (UniqueSubjectName name)
+        Just name -> fmap entityKey <$> getBy (UniqueSubjectName name)
       pure
         RawContent
           { rawContentTitle = dcTitle dc,

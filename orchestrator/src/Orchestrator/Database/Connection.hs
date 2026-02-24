@@ -20,7 +20,7 @@ import Database.Persist.Postgresql
 import qualified Database.Persist.Postgresql as PG
 import Database.Persist.Sql (SqlPersistT)
 import Orchestrator.Database.Entities (migrateAll)
-import Orchestrator.Database.Migrations (createEnumTypes)
+import Orchestrator.Database.Migrations (createConstraints, createEnumTypes, createIndexes, createTriggers)
 
 -- | A pool of PostgreSQL connections.
 type DbPool = Pool.Pool SqlBackend
@@ -49,3 +49,6 @@ migrateDatabase :: DbPool -> IO ()
 migrateDatabase pool = runDb pool $ do
   createEnumTypes
   runMigration migrateAll
+  createConstraints
+  createTriggers
+  createIndexes

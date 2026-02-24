@@ -15,9 +15,12 @@ category: Application
 build-type: Simple
 extra-doc-files: ../CHANGELOG.md
 extra-source-files:
+  sql/add_interest_score_check.sql
   sql/create_comment_author.sql
   sql/create_content_status.sql
   sql/create_draft_status.sql
+  sql/create_status_indexes.sql
+  sql/create_updated_at_trigger.sql
 
 common common-deps
   build-depends:
@@ -101,8 +104,10 @@ test-suite orchestrator-test
     QuickCheck >=2.14,
     hspec >=2.10,
     hspec-discover >=2.10,
+    monad-logger >=0.3,
     orchestrator,
     persistent >=2.14,
+    persistent-postgresql >=2.13,
 
   ghc-options:
     -threaded

@@ -1,6 +1,15 @@
 {-# LANGUAGE FlexibleInstances #-}
 
-module Orchestrator.Database.Models where
+module Orchestrator.Database.Models
+  ( ContentStatus (..),
+    DraftStatus (..),
+    CommentAuthor (..),
+    TagList (..),
+    InterestScore,
+    mkInterestScore,
+    unInterestScore,
+  )
+where
 
 import Data.Text (Text, pack, stripPrefix, stripSuffix)
 import qualified Data.Text as T
@@ -102,6 +111,29 @@ parseCommentAuthor t = Left $ "Unknown CommentAuthor value: " <> t
 
 instance PersistFieldSql CommentAuthor where
   sqlType _ = SqlOther "comment_author"
+
+-- | A validated interest score in the inclusive range 1–5.
+--
+-- The constructor is not exported; use 'mkInterestScore' to build values.
+--
+-- >>> fmap unInterestScore (mkInterestScore 3)
+-- Right 3
+newtype InterestScore = InterestScore {unInterestScore :: Int}
+  deriving (Show, Eq, Ord)
+
+-- | Smart constructor for 'InterestScore'.
+-- Returns 'Left' with an error message if the value is outside 1–5.
+mkInterestScore :: Int -> Either Text InterestScore
+mkInterestScore n
+  | n >= 1 && n <= 5 = Right (InterestScore n)
+  | otherwise = Left $ "InterestScore must be between 1 and 5, got: " <> pack (show n)
+
+instance PersistField InterestScore where
+  toPersistValue = toPersistValue . unInterestScore
+  fromPersistValue pv = fromPersistValue pv >>= mkInterestScore
+
+instance PersistFieldSql InterestScore where
+  sqlType _ = SqlInt64
 
 -- | A list of tags stored as a PostgreSQL @text[]@ array.
 --

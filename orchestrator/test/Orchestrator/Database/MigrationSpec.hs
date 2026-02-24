@@ -16,17 +16,10 @@ import Orchestrator.Database.Models
 import Test.Hspec
 import TestHelpers
 
--- ---------------------------------------------------------------------------
--- Spec
--- ---------------------------------------------------------------------------
-
 spec :: Spec
 spec = do
   pool <- runIO setupTestPool
 
-  -- -----------------------------------------------------------------------
-  -- Migration lifecycle
-  -- -----------------------------------------------------------------------
   describe "migrateDatabase" $ do
     it "succeeds on a freshly migrated database" $
       migrateDatabase pool `shouldReturn` ()
@@ -35,9 +28,6 @@ spec = do
       migrateDatabase pool
       migrateDatabase pool `shouldReturn` ()
 
-  -- -----------------------------------------------------------------------
-  -- Schema shape
-  -- -----------------------------------------------------------------------
   describe "database schema" $ do
     it "creates all expected tables" $ do
       tables <- getPublicTables pool
@@ -56,9 +46,18 @@ spec = do
       types <- getPgEnumTypes pool
       types `shouldContain` ["comment_author"]
 
-  -- -----------------------------------------------------------------------
-  -- ContentStatus persistence
-  -- -----------------------------------------------------------------------
+    it "adds the interest_score range constraint" $ do
+      constraints <- getPgConstraints pool
+      constraints `shouldContain` ["subject_interest_score_range"]
+
+    it "creates updated_at triggers" $ do
+      triggers <- getPgTriggers pool
+      triggers `shouldContain` ["set_post_draft_updated_at", "set_raw_content_updated_at", "set_subject_updated_at"]
+
+    it "creates status indexes" $ do
+      indexes <- getPgIndexes pool
+      indexes `shouldContain` ["idx_post_draft_status", "idx_raw_content_status"]
+
   describe "ContentStatus persistence" $
     before_ (truncateTestTables pool) $ do
       it "persists and reads back ContentNew" $
@@ -70,9 +69,6 @@ spec = do
       it "persists and reads back ContentDrafted" $
         roundTripStatus pool ContentDrafted
 
-  -- -----------------------------------------------------------------------
-  -- DraftStatus persistence
-  -- -----------------------------------------------------------------------
   describe "DraftStatus persistence" $
     before_ (truncateTestTables pool) $ do
       it "persists and reads back DraftReviewing" $
@@ -84,9 +80,6 @@ spec = do
       it "persists and reads back DraftPublished" $
         roundTripDraftStatus pool DraftPublished
 
-  -- -----------------------------------------------------------------------
-  -- CommentAuthor persistence
-  -- -----------------------------------------------------------------------
   describe "CommentAuthor persistence" $
     before_ (truncateTestTables pool) $ do
       it "persists and reads back CommentAuthorUser" $
@@ -95,9 +88,6 @@ spec = do
       it "persists and reads back CommentAuthorJarvis" $
         roundTripCommentAuthor pool CommentAuthorJarvis
 
-  -- -----------------------------------------------------------------------
-  -- TagList persistence
-  -- -----------------------------------------------------------------------
   describe "TagList persistence" $
     before_ (truncateTestTables pool) $ do
       it "persists and reads back an empty tag list" $
@@ -112,9 +102,79 @@ spec = do
       it "persists and reads back tags with commas and quotes" $
         roundTripTagList pool "branch/special" (TagList ["a,b", "say \"hi\""])
 
--- ---------------------------------------------------------------------------
--- Helpers
--- ---------------------------------------------------------------------------
+  describe "PostDraftSource" $
+    before_ (truncateTestTables pool) $
+      it "links a PostDraft to a RawContent" $ do
+        now <- getCurrentTime
+        rcId <-
+          runDb pool $
+            insert
+              RawContent
+                { rawContentTitle = "Source article",
+                  rawContentUrl = "https://example.com/source",
+                  rawContentSummary = "Summary.",
+                  rawContentRawHtml = Nothing,
+                  rawContentSubjectId = Nothing,
+                  rawContentStatus = ContentNew,
+                  rawContentRejectionReason = Nothing,
+                  rawContentCreatedAt = now,
+                  rawContentUpdatedAt = now
+                }
+        pdId <-
+          runDb pool $
+            insert
+              PostDraft
+                { postDraftTitle = "Draft",
+                  postDraftGitBranch = "draft/fk-test",
+                  postDraftSubjectId = Nothing,
+                  postDraftSuggestedTags = TagList [],
+                  postDraftStatus = DraftReviewing,
+                  postDraftDiscordThreadId = Nothing,
+                  postDraftPublishedAt = Nothing,
+                  postDraftPublishedUrl = Nothing,
+                  postDraftCreatedAt = now,
+                  postDraftUpdatedAt = now
+                }
+        srcId <-
+          runDb pool $
+            insert
+              PostDraftSource
+                { postDraftSourcePostDraftId = pdId,
+                  postDraftSourceRawContentId = rcId
+                }
+        msrc <- runDb pool $ get srcId
+        fmap postDraftSourcePostDraftId msrc `shouldBe` Just pdId
+        fmap postDraftSourceRawContentId msrc `shouldBe` Just rcId
+
+-- | All trigger names in the database.
+getPgTriggers :: DbPool -> IO [Text]
+getPgTriggers pool = do
+  rows <-
+    runDb pool $
+      rawSql
+        "SELECT tgname FROM pg_trigger WHERE tgisinternal = false ORDER BY tgname"
+        []
+  return $ map (\(Single t) -> t) rows
+
+-- | All index names in the public schema.
+getPgIndexes :: DbPool -> IO [Text]
+getPgIndexes pool = do
+  rows <-
+    runDb pool $
+      rawSql
+        "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' ORDER BY indexname"
+        []
+  return $ map (\(Single t) -> t) rows
+
+-- | All CHECK constraint names in the database.
+getPgConstraints :: DbPool -> IO [Text]
+getPgConstraints pool = do
+  rows <-
+    runDb pool $
+      rawSql
+        "SELECT conname FROM pg_constraint WHERE contype = 'c' ORDER BY conname"
+        []
+  return $ map (\(Single t) -> t) rows
 
 -- | All table names in the public schema, sorted.
 getPublicTables :: DbPool -> IO [Text]

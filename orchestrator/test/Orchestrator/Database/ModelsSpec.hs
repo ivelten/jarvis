@@ -7,15 +7,15 @@ module Orchestrator.Database.ModelsSpec (spec) where
 
 import Data.ByteString.Char8 (pack)
 import Data.Text (Text)
+import qualified Data.Text as T
 import Database.Persist (PersistField (..), PersistValue (..))
 import Orchestrator.Database.Models
 import Test.Hspec
+import Test.Hspec.QuickCheck (prop)
+import Test.QuickCheck (elements, forAll, listOf, listOf1)
 
 spec :: Spec
 spec = do
-  -- -----------------------------------------------------------------------
-  -- ContentStatus
-  -- -----------------------------------------------------------------------
   describe "ContentStatus" $ do
     it "round-trips all values via PersistText (happy path)" $
       all
@@ -35,9 +35,6 @@ spec = do
       (fromPersistValue (PersistText "oops") :: Either Text ContentStatus)
         `shouldBe` Left "Unknown ContentStatus value: oops"
 
-  -- -----------------------------------------------------------------------
-  -- DraftStatus
-  -- -----------------------------------------------------------------------
   describe "DraftStatus" $ do
     it "round-trips all values via PersistText (happy path)" $
       all
@@ -57,9 +54,6 @@ spec = do
       (fromPersistValue (PersistText "oops") :: Either Text DraftStatus)
         `shouldBe` Left "Unknown DraftStatus value: oops"
 
-  -- -----------------------------------------------------------------------
-  -- CommentAuthor
-  -- -----------------------------------------------------------------------
   describe "CommentAuthor" $ do
     it "round-trips all values via PersistText (happy path)" $
       all
@@ -77,9 +71,6 @@ spec = do
       (fromPersistValue (PersistText "oops") :: Either Text CommentAuthor)
         `shouldBe` Left "Unknown CommentAuthor value: oops"
 
-  -- -----------------------------------------------------------------------
-  -- TagList
-  -- -----------------------------------------------------------------------
   describe "TagList" $ do
     let rt tl = fromPersistValue (toPersistValue tl)
 
@@ -108,3 +99,26 @@ spec = do
           Either Text TagList
       )
         `shouldBe` Left "Invalid PostgreSQL array format: not an array"
+
+  describe "InterestScore" $ do
+    it "accepts all values in range 1–5" $
+      map (fmap unInterestScore . mkInterestScore) [1 .. 5]
+        `shouldBe` map Right [1 .. 5]
+
+    it "rejects 0" $
+      mkInterestScore 0
+        `shouldBe` Left "InterestScore must be between 1 and 5, got: 0"
+
+    it "rejects 6" $
+      mkInterestScore 6
+        `shouldBe` Left "InterestScore must be between 1 and 5, got: 6"
+
+    it "round-trips via PersistField for all valid values" $
+      map (\n -> fmap unInterestScore (mkInterestScore n >>= fromPersistValue . toPersistValue)) [1 .. 5]
+        `shouldBe` map Right [1 .. 5]
+
+  describe "TagList (property)" $ do
+    let genTag = T.pack <$> listOf (elements $ ['a' .. 'z'] ++ ['A' .. 'Z'] ++ "0123456789 ,\"\\{}")
+    prop "round-trips arbitrary tag lists" $
+      forAll (listOf genTag) $ \tags ->
+        fromPersistValue (toPersistValue (TagList tags)) == Right (TagList tags)

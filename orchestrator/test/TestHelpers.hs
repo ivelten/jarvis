@@ -10,9 +10,11 @@ module TestHelpers
   )
 where
 
+import Control.Monad.Logger (runNoLoggingT)
 import Data.ByteString (ByteString)
+import Database.Persist.Postgresql (createPostgresqlPool)
 import Database.Persist.Sql (rawExecute)
-import Orchestrator.Database.Connection (DbPool, createPool, migrateDatabase, runDb)
+import Orchestrator.Database.Connection (DbPool, migrateDatabase, runDb)
 
 -- | Connection string for the isolated integration-test database.
 testConnStr :: ByteString
@@ -24,7 +26,7 @@ testConnStr = "host=db port=5432 user=postgres password=postgres dbname=jarvis_t
 -- idempotent.
 setupTestPool :: IO DbPool
 setupTestPool = do
-  pool <- createPool testConnStr
+  pool <- runNoLoggingT $ createPostgresqlPool testConnStr 1
   migrateDatabase pool
   return pool
 
