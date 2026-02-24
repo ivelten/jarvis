@@ -11,6 +11,14 @@ ghc --version
 cabal --version
 haskell-language-server-wrapper --version
 
+# Update Cabal package index
+echo "Updating Cabal package index..."
+cabal update
+
+# Install Haskell tooling
+echo "Installing ormolu (Haskell formatter)..."
+cabal install ormolu --overwrite-policy=always
+
 # Verify critical executable commands
 echo "Verifying system utilities..."
 for cmd in make gcc curl git psql pkg-config direnv socat ps; do
@@ -30,6 +38,7 @@ This container has been set up with:
 - GHC 9.6.7
 - Cabal 3.10.3.0
 - HLS 2.12.0.0
+- ormolu (Haskell formatter)
 - Required system dependencies (make, gcc, curl, git, psql, pkg-config, direnv, socat, ps)
 
 To access the database, you can run the following command, or access it directly via SQLTools plugin:

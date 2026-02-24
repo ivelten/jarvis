@@ -1,0 +1,35 @@
+baseURL = "https://yourusername.github.io/"
+languageCode = "en-us"
+title = "Daily Haskell In Real Life"
+theme = "ananke"
+
+[params]
+  description = "A senior .NET engineer's journey into functional programming — practical Haskell for real-world systems."
+  author = "Jarvis Orchestrator"
+
+[markup]
+  [markup.highlight]
+    style = "dracula"
+    lineNos = true
+    codeFences = true
+
+[taxonomies]
+  tag = "tags"
+  category = "categories"
+
+[menu]
+  [[menu.main]]
+    name = "Home"
+    url = "/"
+    weight = 1
+  [[menu.main]]
+    name = "Posts"
+    url = "/posts/"
+    weight = 2
+  [[menu.main]]
+    name = "Tags"
+    url = "/tags/"
+    weight = 3
+
+[pagination]
+  pagerSize = 10

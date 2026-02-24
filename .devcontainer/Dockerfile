@@ -45,6 +45,9 @@ RUN echo 'eval "$(direnv hook bash)"' >> ~/.bashrc && \
 # Installs and configures HLS
 RUN ghcup install hls 2.12.0.0 --set
 
+# Install cabal-gild (used by HLS for .cabal file formatting)
+RUN cabal install cabal-gild --overwrite-policy=always
+
 # Configure cabal for better performance
 RUN mkdir -p ~/.cabal && \
     echo "jobs: \$ncpus" >> ~/.cabal/config && \
