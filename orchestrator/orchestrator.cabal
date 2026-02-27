@@ -15,6 +15,7 @@ category: Application
 build-type: Simple
 extra-doc-files: ../CHANGELOG.md
 extra-source-files:
+  prompts/*.txt
   sql/constraints/*.sql
   sql/indexes/*.sql
   sql/triggers/*.sql

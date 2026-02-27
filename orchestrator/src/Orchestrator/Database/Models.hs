@@ -42,6 +42,7 @@ instance PersistField ContentStatus where
     PersistLiteral bs -> parseContentStatus (decodeUtf8 bs)
     _ -> Left $ "Expected text for ContentStatus, got: " <> pack (show pv)
 
+-- | Parse a Text value into a ContentStatus, returning an error message on failure.
 parseContentStatus :: Text -> Either Text ContentStatus
 parseContentStatus "new" = Right ContentNew
 parseContentStatus "rejected" = Right ContentRejected
@@ -104,6 +105,7 @@ instance PersistField CommentAuthor where
     PersistLiteral bs -> parseCommentAuthor (decodeUtf8 bs)
     _ -> Left $ "Expected text for CommentAuthor, got: " <> pack (show pv)
 
+-- | Parse a Text value into a CommentAuthor, returning an error message on failure.
 parseCommentAuthor :: Text -> Either Text CommentAuthor
 parseCommentAuthor "user" = Right CommentAuthorUser
 parseCommentAuthor "jarvis" = Right CommentAuthorJarvis
@@ -157,6 +159,7 @@ instance PersistField TagList where
   fromPersistValue (PersistLiteralEscaped bs) = parsePgTextArray (decodeUtf8 bs)
   fromPersistValue v = Left $ "Expected text[] for TagList, got: " <> pack (show v)
 
+-- | Parse a PostgreSQL text array literal into a TagList, returning an error message on failure.
 parsePgTextArray :: Text -> Either Text TagList
 parsePgTextArray t =
   case stripPrefix "{" t >>= stripSuffix "}" of
