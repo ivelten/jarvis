@@ -25,11 +25,11 @@ import Database.Persist.Sql (PersistFieldSql (..), SqlType (..))
 -- >>> toPersistValue ContentNew
 -- PersistText "new"
 data ContentStatus
-  = -- | Freshly discovered, not yet triaged
+  = -- | Content freshly discovered, not yet triaged.
     ContentNew
-  | -- | Discarded by AI or human reviewer
+  | -- | Content discarded by AI or human reviewer.
     ContentRejected
-  | -- | At least one PostDraft has been created from this content
+  | -- | At least one PostDraft has been created from this content.
     ContentDrafted
   deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
@@ -59,11 +59,11 @@ instance PersistFieldSql ContentStatus where
 -- >>> toPersistValue DraftApproved
 -- PersistText "approved"
 data DraftStatus
-  = -- | Sent to Discord, awaiting human review
+  = -- | Draft sent to Discord, awaiting human review.
     DraftReviewing
-  | -- | Human approved; ready to publish
+  | -- | Draft is human approved; ready to publish.
     DraftApproved
-  | -- | Committed to Hugo repo and live on the blog
+  | -- | Draft committed to Hugo repo and live on the blog.
     DraftPublished
   deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
