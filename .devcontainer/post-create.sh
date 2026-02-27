@@ -11,13 +11,13 @@ ghc --version
 cabal --version
 haskell-language-server-wrapper --version
 
-# Update Cabal package index
-echo "Updating Cabal package index..."
-cabal update
-
 # Install Haskell tooling
 echo "Installing ormolu (Haskell formatter)..."
 cabal install ormolu --overwrite-policy=always
+
+# Build project and run tests
+echo "Building project and running tests..."
+/workspaces/jarvis/build.sh
 
 # Verify critical executable commands
 echo "Verifying system utilities..."
