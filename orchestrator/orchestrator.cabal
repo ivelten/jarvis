@@ -37,6 +37,7 @@ common common-deps
     DerivingStrategies
     GeneralizedNewtypeDeriving
     LambdaCase
+    NumericUnderscores
     OverloadedStrings
     RecordWildCards
     TupleSections
@@ -62,6 +63,8 @@ library
     -- Discord
     -- Logging
     -- Utilities
+    base64-bytestring >=1.2,
+    containers >=0.6,
     discord-haskell >=1.16,
     envy >=2.1,
     esqueleto >=3.5,
@@ -69,6 +72,7 @@ library
     http-client >=0.7,
     http-client-tls >=0.3,
     http-conduit >=2.3,
+    http-types >=0.12,
     monad-logger >=0.3,
     persistent >=2.14,
     persistent-postgresql >=2.13,
@@ -83,7 +87,10 @@ executable orchestrator
   main-is: Main.hs
   hs-source-dirs: app
   build-depends:
-    orchestrator
+    envy >=2.1,
+    http-client-tls >=0.3,
+    orchestrator,
+    persistent >=2.14,
 
   ghc-options:
     -threaded
