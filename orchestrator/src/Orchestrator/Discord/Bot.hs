@@ -1,6 +1,7 @@
 module Orchestrator.Discord.Bot
   ( DiscordConfig (..),
     ReviewResult (..),
+    SendRequest (..),
     mkDiscordConfig,
     sendForReview,
     awaitReview,
@@ -92,7 +93,9 @@ awaitReview ::
 awaitReview cfg msgIdText = do
   resultVar <- newEmptyMVar
   atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert msgIdText resultVar)
-  takeMVar resultVar
+  result <- takeMVar resultVar
+  atomically $ modifyTVar' (dcReviewMap cfg) (Map.delete msgIdText)
+  pure result
 
 -- | Start the long-running Discord bot event loop.
 -- This function blocks indefinitely; call it in a dedicated thread.
@@ -165,9 +168,7 @@ eventHandler cfg (MessageReactionAdd ri) = do
         rm <- readTVar (dcReviewMap cfg)
         case Map.lookup msgKey rm of
           Nothing -> pure Nothing
-          Just var -> do
-            modifyTVar' (dcReviewMap cfg) (Map.delete msgKey)
-            pure (Just var)
+          Just var -> pure (Just var)
     case mVar of
       Nothing -> pure ()
       Just var ->

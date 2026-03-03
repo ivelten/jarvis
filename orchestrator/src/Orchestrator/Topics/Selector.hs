@@ -1,5 +1,6 @@
 module Orchestrator.Topics.Selector
   ( ingestDiscoveredContent,
+    ingestContent,
     pendingContent,
   )
 where
@@ -23,13 +24,19 @@ import Orchestrator.Database.Models
 ingestDiscoveredContent :: AiConfig -> SqlPersistT IO ()
 ingestDiscoveredContent aiCfg = do
   discovered <- liftIO $ discoverContent aiCfg
+  ingestContent discovered
+
+-- | Persist a list of already-discovered content items (upsert by URL).
+-- Triage fields (@status@, @rejectionReason@) are never overwritten on
+-- conflict, so human decisions are preserved.
+-- This is separated from 'ingestDiscoveredContent' to allow testing without
+-- a real AI call.
+ingestContent :: [DiscoveredContent] -> SqlPersistT IO ()
+ingestContent discovered = do
   now <- liftIO getCurrentTime
   rows <- mapM (toRawContent now) discovered
   mapM_ upsertRow rows
   where
-    -- \| Insert a newly discovered URL, or refresh its metadata if it already
-    -- exists.  The triage fields (@status@, @rejectionReason@) are left
-    -- untouched on a conflict so that human decisions are never overwritten.
     upsertRow rc =
       upsertBy
         (UniqueContentUrl (rawContentUrl rc))

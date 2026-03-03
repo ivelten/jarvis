@@ -6,6 +6,9 @@ module Orchestrator.AI.Client
     GeneratedDraft (..),
     discoverContent,
     generateDraft,
+    extractText,
+    splitTitle,
+    toSlug,
   )
 where
 

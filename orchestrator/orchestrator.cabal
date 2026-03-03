@@ -103,9 +103,12 @@ test-suite orchestrator-test
   main-is: Main.hs
   hs-source-dirs: test
   other-modules:
+    Orchestrator.AI.ClientSpec
     Orchestrator.Database.MigrationSpec
     Orchestrator.Database.ModelsSpec
+    Orchestrator.Discord.BotSpec
     Orchestrator.Posts.GeneratorSpec
+    Orchestrator.Topics.SelectorSpec
     Spec
     TestHelpers
 
@@ -114,6 +117,7 @@ test-suite orchestrator-test
 
   build-depends:
     QuickCheck >=2.14,
+    containers >=0.6,
     hspec >=2.10,
     hspec-discover >=2.10,
     monad-logger >=0.3,
@@ -121,6 +125,7 @@ test-suite orchestrator-test
     persistent >=2.14,
     persistent-postgresql >=2.13,
     postgresql-simple >=0.6,
+    stm >=2.5,
 
   ghc-options:
     -threaded
