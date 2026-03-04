@@ -14,10 +14,11 @@ module Orchestrator.AI.Client
 where
 
 import Data.Aeson
-import Data.Aeson.Types (parseMaybe)
+import Data.Aeson.Types (Parser, parseMaybe)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum, toLower)
 import Data.FileEmbed (embedFile, makeRelativeToProject)
+import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -145,6 +146,36 @@ decodeText t =
     Left err -> ioError (userError $ "JSON decode error: " <> err)
     Right v -> pure v
 
+-- | If the Gemini response contains a top-level @{"error": ...}@ object,
+-- throw an 'IOError' with the API error code and message so callers get
+-- a useful diagnosis (e.g. 429 quota exhausted) instead of a generic
+-- "could not extract text" failure.
+checkGeminiError :: Value -> IO ()
+checkGeminiError v =
+  case parseMaybe extractError v of
+    Nothing -> pure ()
+    Just msg -> ioError (userError $ "Gemini API error: " <> T.unpack msg)
+  where
+    extractError = withObject "GeminiResponse" $ \o -> do
+      errObj <- o .: "error"
+      code <- errObj .: "code" :: Parser Int
+      msg <- errObj .: "message"
+      pure $ "HTTP " <> T.pack (show code) <> " — " <> msg
+
+-- | Strip markdown code fences that Gemini sometimes wraps around JSON output.
+-- Handles both @```json\n...\n```@ and bare @```\n...\n```@.
+stripFences :: Text -> Text
+stripFences t =
+  let ls = T.lines t
+      trimmed = case ls of
+        (h : rest)
+          | isJust (T.stripPrefix "```" h) ->
+              case reverse rest of
+                ("```" : body) -> reverse body
+                _ -> rest
+        _ -> ls
+   in T.strip (T.unlines trimmed)
+
 -- ---------------------------------------------------------------------------
 -- Public API
 -- ---------------------------------------------------------------------------
@@ -156,10 +187,11 @@ discoverContent cfg = do
   respBody <- postGemini cfg requestBody'
   case eitherDecode respBody of
     Left err -> ioError (userError $ "Gemini HTTP response parse error: " <> err)
-    Right v ->
+    Right v -> do
+      checkGeminiError v
       case extractText v of
         Nothing -> ioError (userError "Gemini: could not extract text from response")
-        Just txt -> decodeText txt
+        Just txt -> decodeText (stripFences txt)
   where
     prompt = discoverPrompt
     requestBody' =
@@ -170,27 +202,9 @@ discoverContent cfg = do
                      "parts" .= [object ["text" .= prompt]]
                    ]
                ],
-          "tools" .= [object ["google_search" .= object []]],
-          "generationConfig"
-            .= object
-              [ "responseMimeType" .= ("application/json" :: Text),
-                "responseSchema"
-                  .= object
-                    [ "type" .= ("array" :: Text),
-                      "items"
-                        .= object
-                          [ "type" .= ("object" :: Text),
-                            "properties"
-                              .= object
-                                [ "title" .= object ["type" .= ("string" :: Text)],
-                                  "url" .= object ["type" .= ("string" :: Text)],
-                                  "summary" .= object ["type" .= ("string" :: Text)],
-                                  "subject" .= object ["type" .= ("string" :: Text)]
-                                ],
-                            "required" .= (["title", "url", "summary"] :: [Text])
-                          ]
-                    ]
-              ]
+          -- google_search grounding is incompatible with responseMimeType/responseSchema
+          -- JSON mode; the prompt instructs the model to return JSON directly.
+          "tools" .= [object ["google_search" .= object []]]
         ]
 
 -- | Ask Gemini to write a full Markdown blog post draft based on the provided
@@ -200,7 +214,8 @@ generateDraft cfg sources = do
   respBody <- postGemini cfg requestBody'
   case eitherDecode respBody of
     Left err -> ioError (userError $ "Gemini HTTP response parse error: " <> err)
-    Right v ->
+    Right v -> do
+      checkGeminiError v
       case extractText v of
         Nothing -> ioError (userError "Gemini: could not extract text from response")
         Just mdText -> do
@@ -249,7 +264,8 @@ reviseDraft cfg _title currentBody feedback = do
   respBody <- postGemini cfg requestBody'
   case eitherDecode respBody of
     Left err -> ioError (userError $ "Gemini HTTP response parse error: " <> err)
-    Right v ->
+    Right v -> do
+      checkGeminiError v
       case extractText v of
         Nothing -> ioError (userError "Gemini: could not extract text from response")
         Just mdText -> do
