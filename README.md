@@ -15,8 +15,6 @@ By leveraging the **Gemini API** and a **GitOps-driven deployment pipeline**, Ja
 - **Engineering Excellence**: Showcase a complete Haskell ecosystem, including database persistence, multimodal AI integration, and automated CI/CD.
 - **GitOps Maturity**: Automate the delivery of a Hugo-based site hosted on GitHub Pages with zero manual intervention.
 
----
-
 ## Architecture
 
 The orchestrator runs four parallel workers, each on its own independent schedule:
@@ -44,8 +42,6 @@ main thread
 
 React with **❌** at any point to reject the draft (it is removed from the queue and logged).
 
----
-
 ## Development environment
 
 > **This project is designed for [Visual Studio Code](https://code.visualstudio.com/) with the official Dev Containers extension.**
@@ -64,8 +60,6 @@ React with **❌** at any point to reject the draft (it is removed from the queu
 2. When prompted, click **Reopen in Container** (or run **Dev Containers: Reopen in Container** from the command palette).
 3. VS Code builds the image and starts a PostgreSQL sidecar automatically. Both services are defined in `.devcontainer/docker-compose.yml`.
 4. Once inside the container, GHC 9.6 and Cabal are ready on the `PATH`.
-
----
 
 ## How to run locally
 
@@ -126,7 +120,7 @@ cabal run orchestrator
 
 The database schema is migrated automatically on first start. You will see output similar to:
 
-```
+```text
 [Jarvis] Starting orchestrator...
 [Jarvis] Database ready.
 [Jarvis] All workers started. Discord bot running...
@@ -143,14 +137,12 @@ The database schema is migrated automatically on first start. You will see outpu
 - Type feedback in the thread to request AI revisions.
 - When satisfied, type `publish` (or react ✅) to commit and deploy.
 
----
-
 ## Configuration reference
 
 All configuration is read from environment variables. See `.env.example` for the full list with descriptions.
 
 | Variable | Required | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `DATABASE_URL` | ✅ | — | PostgreSQL connection string |
 | `GEMINI_API_KEY` | ✅ | — | Google AI API key |
 | `GEMINI_MODEL` | | `gemini-2.0-flash` | Gemini model name |
@@ -160,13 +152,11 @@ All configuration is read from environment variables. See `.env.example` for the
 | `GITHUB_BRANCH` | | `main` | Branch to commit posts to |
 | `GITHUB_POSTS_PATH` | | `content/posts` | Path to Hugo posts inside the repo |
 | `GITHUB_WORKFLOW_ID` | | `deploy.yml` | Workflow filename to dispatch |
-| `DISCORD_BOT_TOKEN` | ✅ | — | Bot token (without `Bot ` prefix) |
+| `DISCORD_BOT_TOKEN` | ✅ | — | Bot token (without `Bot` prefix) |
 | `DISCORD_GUILD_ID` | ✅ | — | Server (guild) ID |
 | `DISCORD_CHANNEL_ID` | ✅ | — | Review channel ID |
 | `DISCOVERY_INTERVAL_SECS` | | `86400` | How often to discover new content (seconds) |
 | `DRAFT_INTERVAL_SECS` | | `3600` | How often to generate a new draft (seconds) |
-
----
 
 ## Running the tests
 
