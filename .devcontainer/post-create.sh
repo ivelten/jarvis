@@ -15,13 +15,16 @@ haskell-language-server-wrapper --version
 echo "Installing ormolu (Haskell formatter)..."
 cabal install ormolu --overwrite-policy=always
 
+echo "Installing hspec-discover (test discovery tool)..."
+cabal install hspec-discover --overwrite-policy=always
+
 # Build project and run tests
 echo "Building project and running tests..."
 /workspaces/jarvis/build.sh
 
 # Verify critical executable commands
 echo "Verifying system utilities..."
-for cmd in make gcc curl git psql pkg-config direnv socat ps; do
+for cmd in make gcc curl git psql pkg-config direnv socat ps hspec-discover; do
     if ! command -v $cmd &> /dev/null; then
         echo "❌ $cmd is not installed!"
         exit 1
@@ -39,6 +42,7 @@ This container has been set up with:
 - Cabal 3.10.3.0
 - HLS 2.12.0.0
 - ormolu (Haskell formatter)
+- hspec-discover (test discovery tool)
 - Required system dependencies (make, gcc, curl, git, psql, pkg-config, direnv, socat, ps)
 
 To access the database, you can run the following command, or access it directly via SQLTools plugin:

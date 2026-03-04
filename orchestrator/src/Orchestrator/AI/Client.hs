@@ -16,7 +16,7 @@ import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum, toLower)
-import Data.FileEmbed (embedStringFile, makeRelativeToProject)
+import Data.FileEmbed (embedFile, makeRelativeToProject)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -83,12 +83,12 @@ instance ToJSON GeneratedDraft
 
 -- | Prompt for 'discoverContent' – embedded from @prompts/discover_content.txt@.
 discoverPrompt :: Text
-discoverPrompt = T.pack $(makeRelativeToProject "prompts/discover_content.txt" >>= embedStringFile)
+discoverPrompt = TE.decodeUtf8 $(makeRelativeToProject "prompts/discover_content.txt" >>= embedFile)
 
 -- | Prompt template for 'generateDraft' – embedded from @prompts/generate_draft.txt@.
 -- The literal @{{SOURCES}}@ is replaced at runtime with the formatted sources list.
 draftPromptTemplate :: Text
-draftPromptTemplate = T.pack $(makeRelativeToProject "prompts/generate_draft.txt" >>= embedStringFile)
+draftPromptTemplate = TE.decodeUtf8 $(makeRelativeToProject "prompts/generate_draft.txt" >>= embedFile)
 
 -- ---------------------------------------------------------------------------
 -- Internal HTTP helpers
