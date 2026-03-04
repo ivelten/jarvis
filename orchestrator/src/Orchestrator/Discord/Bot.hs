@@ -24,6 +24,10 @@ import Discord.Requests (ChannelRequest (..), MessageDetailedOpts (..))
 import Discord.Types
 import GHC.Generics (Generic)
 
+-- ---------------------------------------------------------------------------
+-- Types
+-- ---------------------------------------------------------------------------
+
 -- | Internal record passed through the send queue.
 data SendRequest = SendRequest
   { srTitle :: !Text,
@@ -46,6 +50,10 @@ data DiscordConfig = DiscordConfig
     dcReviewMap :: !(TVar (Map Text (MVar ReviewResult)))
   }
 
+-- ---------------------------------------------------------------------------
+-- Configuration
+-- ---------------------------------------------------------------------------
+
 -- | Smart constructor — allocates the internal communication channels.
 mkDiscordConfig :: Text -> Word -> Word -> IO DiscordConfig
 mkDiscordConfig token guildId channelId = do
@@ -67,6 +75,10 @@ data ReviewResult
   | -- | Reviewer reacted with ❌.
     Rejected !Text
   deriving (Show, Eq, Generic)
+
+-- ---------------------------------------------------------------------------
+-- Public API
+-- ---------------------------------------------------------------------------
 
 -- | Post a draft to the configured Discord review channel.
 -- Blocks until the bot has sent the message, then returns its Discord message
@@ -114,6 +126,10 @@ startBot cfg = do
           discordOnLog = \t -> putStrLn $ "[Discord] " <> T.unpack t
         }
   putStrLn $ "[Discord] bot stopped: " <> T.unpack err
+
+-- ---------------------------------------------------------------------------
+-- Internal bot workers
+-- ---------------------------------------------------------------------------
 
 -- | Launched from 'discordOnStart': forks a thread that drains the send
 -- queue and sends embed messages on behalf of the pipeline.
@@ -178,6 +194,10 @@ eventHandler cfg (MessageReactionAdd ri) = do
               then Approved
               else Rejected emoji
 eventHandler _ _ = pure ()
+
+-- ---------------------------------------------------------------------------
+-- Utilities
+-- ---------------------------------------------------------------------------
 
 -- | Convert a raw Word ID to a Discord 'ChannelId'.
 mkChannelId :: Word -> ChannelId

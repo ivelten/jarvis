@@ -85,6 +85,10 @@ spec = do
       let json = "{\"title\":\"T\"}"
       (decode json :: Maybe DiscoveredContent) `shouldBe` Nothing
 
+-- ---------------------------------------------------------------------------
+-- Helpers
+-- ---------------------------------------------------------------------------
+
 -- | Build a minimal Gemini API response wrapping the given text.
 geminiResponse :: Text -> Value
 geminiResponse txt =
@@ -93,7 +97,7 @@ geminiResponse txt =
         .= [ object
                [ "content"
                    .= object
-                        ["parts" .= [object ["text" .= txt]]]
+                     ["parts" .= [object ["text" .= txt]]]
                ]
            ]
     ]

@@ -19,6 +19,10 @@ import Database.Persist.Sql (rawExecute)
 import Database.PostgreSQL.Simple (close, connectPostgreSQL, execute_)
 import Orchestrator.Database.Connection (DbPool, migrateDatabase, runDb)
 
+-- ---------------------------------------------------------------------------
+-- Connection strings
+-- ---------------------------------------------------------------------------
+
 -- | Connection string targeting the PostgreSQL maintenance database,
 -- used to create and drop 'jarvis_test'.
 adminConnStr :: ByteString
@@ -27,6 +31,10 @@ adminConnStr = "host=db port=5432 user=postgres password=postgres dbname=postgre
 -- | Connection string for the isolated integration-test database.
 testConnStr :: ByteString
 testConnStr = "host=db port=5432 user=postgres password=postgres dbname=jarvis_test"
+
+-- ---------------------------------------------------------------------------
+-- Database lifecycle
+-- ---------------------------------------------------------------------------
 
 -- | Drop (if it exists) and re-create the 'jarvis_test' database.
 --
@@ -50,6 +58,10 @@ dropTestDatabase = do
   _ <- execute_ conn "DROP DATABASE IF EXISTS jarvis_test"
   close conn
 
+-- ---------------------------------------------------------------------------
+-- Pool setup
+-- ---------------------------------------------------------------------------
+
 -- | Create a pool against the test database and apply all migrations.
 --
 -- Safe to call multiple times; both enum-type creation and 'migrateAll' are
@@ -59,6 +71,10 @@ setupTestPool = do
   pool <- runNoLoggingT $ createPostgresqlPool testConnStr 1
   migrateDatabase pool
   return pool
+
+-- ---------------------------------------------------------------------------
+-- Data helpers
+-- ---------------------------------------------------------------------------
 
 -- | Remove all rows from every data table and reset sequences.
 --

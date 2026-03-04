@@ -33,6 +33,10 @@ import System.Envy (FromEnv (..), decodeEnv, env, envMaybe)
 import System.Exit (exitFailure)
 import System.IO (BufferMode (..), hSetBuffering, stdout)
 
+-- ---------------------------------------------------------------------------
+-- Configuration
+-- ---------------------------------------------------------------------------
+
 -- | Top-level configuration assembled from environment variables.
 data Config = Config
   { cfgDbUrl :: !String,
@@ -67,6 +71,10 @@ instance FromEnv Config where
       <*> env "DISCORD_GUILD_ID"
       <*> env "DISCORD_CHANNEL_ID"
       <*> (fromMaybe 86400 <$> envMaybe "PIPELINE_INTERVAL_SECS")
+
+-- ---------------------------------------------------------------------------
+-- Pipeline
+-- ---------------------------------------------------------------------------
 
 -- | Run one full cycle of the orchestration pipeline:
 --
@@ -118,6 +126,10 @@ runPipeline aiCfg ghCfg dcCfg pool = do
           triggerDeploy ghCfg
           putStrLn "[Pipeline] Done."
 
+-- ---------------------------------------------------------------------------
+-- Utilities
+-- ---------------------------------------------------------------------------
+
 -- | Convert a database 'RawContent' row into a 'DiscoveredContent' value
 --   suitable for passing to 'generateDraft'.
 rcToDiscovered :: RawContent -> DiscoveredContent
@@ -140,6 +152,10 @@ toSlug =
 -- | Sleep for @n@ seconds (converts to microseconds for 'threadDelay').
 sleepSecs :: Int -> IO ()
 sleepSecs n = threadDelay (n * 1_000_000)
+
+-- ---------------------------------------------------------------------------
+-- Entry point
+-- ---------------------------------------------------------------------------
 
 main :: IO ()
 main = do

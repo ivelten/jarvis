@@ -17,6 +17,10 @@ import GHC.Generics (Generic)
 import Network.HTTP.Client
 import Network.HTTP.Types (RequestHeaders, status404, statusCode)
 
+-- ---------------------------------------------------------------------------
+-- Types
+-- ---------------------------------------------------------------------------
+
 -- | Runtime configuration for the GitHub client.
 data GitHubConfig = GitHubConfig
   { -- | Personal access token with @contents:write@ and @actions:write@.
@@ -34,6 +38,10 @@ data GitHubConfig = GitHubConfig
     ghManager :: !Manager
   }
 
+-- ---------------------------------------------------------------------------
+-- Configuration
+-- ---------------------------------------------------------------------------
+
 -- | Base URL for the GitHub REST API.
 apiBase :: String
 apiBase = "https://api.github.com"
@@ -46,6 +54,10 @@ ghHeaders GitHubConfig {..} =
     ("X-GitHub-Api-Version", "2022-11-28"),
     ("User-Agent", "jarvis-orchestrator/1.0")
   ]
+
+-- ---------------------------------------------------------------------------
+-- Internal helpers
+-- ---------------------------------------------------------------------------
 
 -- | Build the Contents API path for a post file.
 --   Result: @/repos/{owner}/{repo}/contents/{postsPath}/{filename}@
@@ -75,6 +87,10 @@ getFileSha cfg filename = do
       Right v ->
         pure $
           parseMaybe (withObject "FileResponse" (.: "sha")) v
+
+-- ---------------------------------------------------------------------------
+-- Public API
+-- ---------------------------------------------------------------------------
 
 -- | Commit a new (or updated) Hugo post Markdown file to the repository.
 --

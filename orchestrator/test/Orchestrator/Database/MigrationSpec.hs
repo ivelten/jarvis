@@ -174,6 +174,10 @@ spec = do
         fmap postDraftSourcePostDraftId msrc `shouldBe` Just pdId
         fmap postDraftSourceRawContentId msrc `shouldBe` Just rcId
 
+-- ---------------------------------------------------------------------------
+-- Database query helpers
+-- ---------------------------------------------------------------------------
+
 -- | All trigger names in the database.
 getPgTriggers :: DbPool -> IO [Text]
 getPgTriggers pool = do
@@ -224,6 +228,10 @@ getPgEnumTypes pool = do
         "SELECT typname FROM pg_type WHERE typtype = 'e' ORDER BY typname"
         []
   return $ map (\(Single t) -> t) rows
+
+-- ---------------------------------------------------------------------------
+-- Persistence round-trip helpers
+-- ---------------------------------------------------------------------------
 
 -- | Insert a RawContent row with the given status and verify the row reads
 -- back with the same status.

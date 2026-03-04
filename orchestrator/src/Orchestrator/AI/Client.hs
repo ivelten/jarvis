@@ -23,6 +23,10 @@ import qualified Data.Text.Encoding as TE
 import GHC.Generics (Generic)
 import Network.HTTP.Client
 
+-- ---------------------------------------------------------------------------
+-- Types
+-- ---------------------------------------------------------------------------
+
 -- | Runtime configuration for the Gemini client.
 data AiConfig = AiConfig
   { -- | Google AI API key (from environment, see https://aistudio.google.com/apikey).
@@ -73,6 +77,10 @@ instance FromJSON GeneratedDraft
 
 instance ToJSON GeneratedDraft
 
+-- ---------------------------------------------------------------------------
+-- Embedded prompts
+-- ---------------------------------------------------------------------------
+
 -- | Prompt for 'discoverContent' – embedded from @prompts/discover_content.txt@.
 discoverPrompt :: Text
 discoverPrompt = T.pack $(makeRelativeToProject "prompts/discover_content.txt" >>= embedStringFile)
@@ -81,6 +89,10 @@ discoverPrompt = T.pack $(makeRelativeToProject "prompts/discover_content.txt" >
 -- The literal @{{SOURCES}}@ is replaced at runtime with the formatted sources list.
 draftPromptTemplate :: Text
 draftPromptTemplate = T.pack $(makeRelativeToProject "prompts/generate_draft.txt" >>= embedStringFile)
+
+-- ---------------------------------------------------------------------------
+-- Internal HTTP helpers
+-- ---------------------------------------------------------------------------
 
 -- | Build the @generateContent@ endpoint URL for the configured model.
 generateContentUrl :: AiConfig -> String
@@ -126,6 +138,10 @@ decodeText t =
   case eitherDecode (LBS.fromStrict (TE.encodeUtf8 t)) of
     Left err -> ioError (userError $ "JSON decode error: " <> err)
     Right v -> pure v
+
+-- ---------------------------------------------------------------------------
+-- Public API
+-- ---------------------------------------------------------------------------
 
 -- | Ask Gemini (with Google Search grounding) to discover recent, relevant
 --   content and return it as a structured list.
@@ -217,6 +233,10 @@ generateDraft cfg sources = do
                 "maxOutputTokens" .= (2048 :: Int)
               ]
         ]
+
+-- ---------------------------------------------------------------------------
+-- Utilities
+-- ---------------------------------------------------------------------------
 
 -- | Split the first H1 heading from the document body.
 splitTitle :: Text -> (Text, Text)

@@ -22,8 +22,16 @@ import Database.Persist.Sql (SqlPersistT)
 import Orchestrator.Database.Entities (migrateAll)
 import Orchestrator.Database.Migrations (createConstraints, createEnumTypes, createIndexes, createTriggers)
 
+-- ---------------------------------------------------------------------------
+-- Types
+-- ---------------------------------------------------------------------------
+
 -- | A pool of PostgreSQL connections.
 type DbPool = Pool.Pool SqlBackend
+
+-- ---------------------------------------------------------------------------
+-- Pool management
+-- ---------------------------------------------------------------------------
 
 -- | Create a connection pool from a PostgreSQL connection string.
 --
@@ -41,6 +49,10 @@ runDb pool action = liftIO $ runSqlPool action pool
 -- | Alias kept for symmetry with other frameworks.
 withDb :: (MonadIO m) => DbPool -> SqlPersistT IO a -> m a
 withDb = runDb
+
+-- ---------------------------------------------------------------------------
+-- Migrations
+-- ---------------------------------------------------------------------------
 
 -- | Apply all pending migrations.
 --

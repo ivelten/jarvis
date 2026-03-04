@@ -17,6 +17,10 @@ import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Database.Persist (PersistField (..), PersistValue (..))
 import Database.Persist.Sql (PersistFieldSql (..), SqlType (..))
 
+-- ---------------------------------------------------------------------------
+-- ContentStatus
+-- ---------------------------------------------------------------------------
+
 -- | Lifecycle status of a piece of raw content.
 --
 -- The typical progression is @ContentNew → ContentDrafted@; content
@@ -52,6 +56,10 @@ parseContentStatus t = Left $ "Unknown ContentStatus value: " <> t
 instance PersistFieldSql ContentStatus where
   sqlType _ = SqlOther "content_status"
 
+-- ---------------------------------------------------------------------------
+-- DraftStatus
+-- ---------------------------------------------------------------------------
+
 -- | Lifecycle status of a blog post draft.
 --
 -- The typical progression is
@@ -86,6 +94,10 @@ parseDraftStatus t = Left $ "Unknown DraftStatus value: " <> t
 instance PersistFieldSql DraftStatus where
   sqlType _ = SqlOther "draft_status"
 
+-- ---------------------------------------------------------------------------
+-- CommentAuthor
+-- ---------------------------------------------------------------------------
+
 -- | Identifies who authored a 'ReviewComment'.
 --
 -- >>> toPersistValue CommentAuthorJarvis
@@ -114,6 +126,10 @@ parseCommentAuthor t = Left $ "Unknown CommentAuthor value: " <> t
 instance PersistFieldSql CommentAuthor where
   sqlType _ = SqlOther "comment_author"
 
+-- ---------------------------------------------------------------------------
+-- InterestScore
+-- ---------------------------------------------------------------------------
+
 -- | A validated interest score in the inclusive range 1–5.
 --
 -- The constructor is not exported; use 'mkInterestScore' to build values.
@@ -136,6 +152,10 @@ instance PersistField InterestScore where
 
 instance PersistFieldSql InterestScore where
   sqlType _ = SqlInt64
+
+-- ---------------------------------------------------------------------------
+-- TagList
+-- ---------------------------------------------------------------------------
 
 -- | A list of tags stored as a PostgreSQL @text[]@ array.
 --
