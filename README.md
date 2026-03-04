@@ -120,13 +120,13 @@ The `DATABASE_URL` default (`postgresql://postgres:postgres@db:5432/jarvis`) alr
 
 ### 6. Run the orchestrator
 
+From the repository root:
+
 ```bash
-cd orchestrator
-set -a && source .env && set +a
-cabal run orchestrator
+./run.sh
 ```
 
-The database schema is migrated automatically on first start. You will see output similar to:
+The script loads `orchestrator/.env` automatically and starts the orchestrator via `cabal run`. The database schema is migrated on first start. You will see output similar to:
 
 ```text
 [Jarvis] Starting orchestrator...
