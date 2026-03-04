@@ -23,23 +23,23 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import Discord
-import Discord.Requests (ChannelRequest (..), MessageDetailedOpts (..), StartThreadOpts (..))
+import Discord.Requests (ChannelRequest (..), StartThreadForumMediaMessage (..), StartThreadForumMediaOpts (..), StartThreadOpts (..))
 import Discord.Types
 
 -- ---------------------------------------------------------------------------
 -- Types
 -- ---------------------------------------------------------------------------
 
--- | State for a draft currently under review in a Discord thread.
+-- | State for a draft currently under review in a Discord forum thread.
 data PendingReview = PendingReview
   { -- | Post title (used for context).
     prTitle :: !Text,
     -- | Current draft body; updated atomically after each AI revision.
     prCurrentBody :: !(TVar Text),
-    -- | Key in 'dcReviewMap': original channel message Snowflake as text.
-    prMsgKey :: !Text,
-    -- | Key in 'dcThreadMap': thread channel Snowflake as text.
-    prThreadKey :: !Text,
+    -- | Lookup key: forum thread Snowflake as text.  Because in a forum
+    -- channel the thread ID equals the starter message ID, one key serves
+    -- both reaction events and thread-message events.
+    prKey :: !Text,
     -- | Thread 'ChannelId' for posting revision replies.
     prThreadId :: !ChannelId,
     -- | @(currentBody, feedback) -> revisedBody@.  Called on every thread message.
@@ -73,14 +73,14 @@ data DiscordConfig = DiscordConfig
     dcBotToken :: !Text,
     -- | Personal server (guild) ID.
     dcGuildId :: !Word,
-    -- | Review channel ID where embed messages are posted.
+    -- | Forum channel ID where review threads are created.
     dcChannelId :: !Word,
     -- | Internal queue: pipeline puts review requests here.
     dcSendQueue :: !(MVar ReviewRequest),
-    -- | Map from original-message-ID text to pending review (for reaction lookup).
-    dcReviewMap :: !(TVar (Map Text PendingReview)),
-    -- | Map from thread-channel-ID text to pending review (for thread-message lookup).
-    dcThreadMap :: !(TVar (Map Text PendingReview))
+    -- | Map from forum-thread-ID text to pending review.  Because the forum
+    -- thread ID equals the starter message ID, this single map handles both
+    -- reaction events and thread-message events.
+    dcReviewMap :: !(TVar (Map Text PendingReview))
   }
 
 -- ---------------------------------------------------------------------------
@@ -92,15 +92,13 @@ mkDiscordConfig :: Text -> Word -> Word -> IO DiscordConfig
 mkDiscordConfig token guildId channelId = do
   sendQueue <- newEmptyMVar
   reviewMap <- newTVarIO Map.empty
-  threadMap <- newTVarIO Map.empty
   pure
     DiscordConfig
       { dcBotToken = token,
         dcGuildId = guildId,
         dcChannelId = channelId,
         dcSendQueue = sendQueue,
-        dcReviewMap = reviewMap,
-        dcThreadMap = threadMap
+        dcReviewMap = reviewMap
       }
 
 -- ---------------------------------------------------------------------------
@@ -157,10 +155,13 @@ botWorker cfg = do
   hdl <- ask
   liftIO $ void $ forkIO $ drainQueue hdl cfg
 
--- | Continuously reads 'SendRequest' values from the queue, posts an embed in
--- the review channel, creates a Discord thread from that message, posts the
--- full draft body as the first thread message, and registers the review in both
--- lookup maps.
+-- | Continuously reads 'ReviewRequest' values from the queue, creates a forum
+-- thread with the embed as the starter message, posts the full draft body as a
+-- follow-up, and registers the review in 'dcReviewMap'.
+--
+-- Because Discord forum channels assign the same snowflake to the thread and
+-- its starter message, a single map key handles both reaction events and
+-- thread-message events.
 drainQueue :: DiscordHandle -> DiscordConfig -> IO ()
 drainQueue hdl cfg = forever $ do
   ReviewRequest {..} <- takeMVar (dcSendQueue cfg)
@@ -172,59 +173,62 @@ drainQueue hdl cfg = forever $ do
             createEmbedFooterText =
               "React \x2705 to approve, \x274c to reject, or type feedback in the thread."
           }
-      opts = def {messageDetailedEmbeds = Just [embed]}
-  result <- runReaderT (restCall (CreateMessageDetailed chanId opts)) hdl
+      forumMsg =
+        StartThreadForumMediaMessage
+          { startThreadForumMediaMessageContent = "",
+            startThreadForumMediaMessageEmbeds = Just [embed],
+            startThreadForumMediaMessageAllowedMentions = Nothing,
+            startThreadForumMediaMessageComponents = Nothing,
+            startThreadForumMediaMessageStickerIds = Nothing
+          }
+      forumOpts =
+        StartThreadForumMediaOpts
+          { startThreadForumMediaBaseOpts = def {startThreadName = rrTitle},
+            startThreadForumMediaMessage = forumMsg,
+            startThreadForumMediaAppliedTags = Nothing
+          }
+  result <- runReaderT (restCall (StartThreadForumMedia chanId forumOpts)) hdl
   case result of
     Left err ->
-      putStrLn $ "[Discord] failed to send review message: " <> show err
-    Right msg -> do
-      let msgKey = showId (messageId msg)
-          threadOpts = def {startThreadName = rrTitle}
-      threadResult <-
+      putStrLn $ "[Discord] failed to create forum thread: " <> show err
+    Right thread -> do
+      let tid = channelId thread
+          key = showId tid
+          -- In a forum channel the starter message ID equals the thread ID.
+          starterMsgId = DiscordId (unId tid) :: MessageId
+      -- Post full draft body as the first thread reply.
+      void $
         runReaderT
-          (restCall (StartThreadFromMessage chanId (messageId msg) threadOpts))
+          (restCall (CreateMessage tid ("\x1f4dd **Draft:**\n\n" <> T.take 1_900 rrBody)))
           hdl
-      case threadResult of
-        Left tErr ->
-          putStrLn $ "[Discord] failed to create review thread: " <> show tErr
-        Right thread -> do
-          let tid = channelId thread
-              threadKey = showId tid
-          -- Post full draft body in the thread.
-          void $
-            runReaderT
-              (restCall (CreateMessage tid ("\x1f4dd **Draft:**\n\n" <> T.take 1_900 rrBody)))
-              hdl
-          -- Build and register the PendingReview.
-          bodyVar <- newTVarIO rrBody
-          let pr =
-                PendingReview
-                  { prTitle = rrTitle,
-                    prCurrentBody = bodyVar,
-                    prMsgKey = msgKey,
-                    prThreadKey = threadKey,
-                    prThreadId = tid,
-                    prRevise = rrRevise,
-                    prApprove = rrApprove,
-                    prReject = rrReject
-                  }
-          atomically $ do
-            modifyTVar' (dcReviewMap cfg) (Map.insert msgKey pr)
-            modifyTVar' (dcThreadMap cfg) (Map.insert threadKey pr)
-          -- Add reaction affordances to the original embed message.
-          void $
-            runReaderT
-              (restCall (CreateReaction (chanId, messageId msg) "\x2705"))
-              hdl
-          void $
-            runReaderT
-              (restCall (CreateReaction (chanId, messageId msg) "\x274c"))
-              hdl
+      -- Build and register the PendingReview.
+      bodyVar <- newTVarIO rrBody
+      let pr =
+            PendingReview
+              { prTitle = rrTitle,
+                prCurrentBody = bodyVar,
+                prKey = key,
+                prThreadId = tid,
+                prRevise = rrRevise,
+                prApprove = rrApprove,
+                prReject = rrReject
+              }
+      atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert key pr)
+      -- Add reaction affordances to the forum thread starter message.
+      void $
+        runReaderT
+          (restCall (CreateReaction (chanId, starterMsgId) "\x2705"))
+          hdl
+      void $
+        runReaderT
+          (restCall (CreateReaction (chanId, starterMsgId) "\x274c"))
+          hdl
 
 -- | Handle incoming Discord events.
 --
--- * 'MessageReactionAdd' on a known review message: approve (✅) or reject (❌).
--- * 'MessageCreate' inside a known review thread: if 'isApprovalMessage' returns
+-- * 'MessageReactionAdd' on a forum starter message: approve (✅) or reject (❌).
+--   The starter message ID equals the thread ID, so 'dcReviewMap' is used.
+-- * 'MessageCreate' inside a review thread: if 'isApprovalMessage' returns
 --   'True', approve with the current body; otherwise call the AI revision
 --   function and post the revised draft back.
 eventHandler :: DiscordConfig -> Event -> DiscordHandler ()
@@ -233,9 +237,9 @@ eventHandler cfg (MessageReactionAdd ri) = do
   cache <- readCache
   let botId = userId (cacheCurrentUser cache)
   when (reactionUserId ri /= botId) $ do
-    let msgKey = showId (reactionMessageId ri)
+    let key = showId (reactionMessageId ri)
         emoji = emojiName (reactionEmoji ri)
-    mReview <- liftIO $ atomically (lookupAndDeregister cfg msgKey)
+    mReview <- liftIO $ atomically (lookupAndDeregister cfg key)
     case mReview of
       Nothing -> pure ()
       Just pr ->
@@ -248,34 +252,33 @@ eventHandler cfg (MessageCreate m) = do
   cache <- readCache
   let botId = userId (cacheCurrentUser cache)
   when (not (userIsBot (messageAuthor m)) && userId (messageAuthor m) /= botId) $ do
-    let threadKey = showId (messageChannelId m)
-    threadMapSnap <- liftIO $ readTVarIO (dcThreadMap cfg)
-    case Map.lookup threadKey threadMapSnap of
+    let key = showId (messageChannelId m)
+    reviewMapSnap <- liftIO $ readTVarIO (dcReviewMap cfg)
+    case Map.lookup key reviewMapSnap of
       Nothing -> pure ()
       Just pr ->
         if isApprovalMessage (messageContent m)
           then liftIO $ do
-            atomically $ deregisterBoth cfg pr
+            atomically $ deregister cfg key
             readTVarIO (prCurrentBody pr) >>= prApprove pr
           else handleRevision pr (messageContent m)
 eventHandler _ _ = pure ()
 
--- | Atomically look up a pending review by original-message key and remove
--- both map entries so callbacks cannot fire more than once.
+-- | Atomically look up a pending review by key and remove it so the
+-- callback cannot fire more than once.
 lookupAndDeregister :: DiscordConfig -> Text -> STM (Maybe PendingReview)
-lookupAndDeregister cfg msgKey = do
+lookupAndDeregister cfg key = do
   rm <- readTVar (dcReviewMap cfg)
-  case Map.lookup msgKey rm of
+  case Map.lookup key rm of
     Nothing -> pure Nothing
     Just pr -> do
-      deregisterBoth cfg pr
+      deregister cfg key
       pure (Just pr)
 
--- | Atomically remove a pending review from both maps.
-deregisterBoth :: DiscordConfig -> PendingReview -> STM ()
-deregisterBoth cfg pr = do
-  modifyTVar' (dcReviewMap cfg) (Map.delete (prMsgKey pr))
-  modifyTVar' (dcThreadMap cfg) (Map.delete (prThreadKey pr))
+-- | Atomically remove a pending review from 'dcReviewMap'.
+deregister :: DiscordConfig -> Text -> STM ()
+deregister cfg key =
+  modifyTVar' (dcReviewMap cfg) (Map.delete key)
 
 -- | Call the AI revision function and post the result back into the thread.
 -- On failure, post an error message instead.

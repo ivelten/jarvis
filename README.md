@@ -32,11 +32,11 @@ main thread
 
 ### Review flow
 
-1. The draft worker picks the next pending content item, calls Gemini to generate a Markdown draft, and posts an embed message to your Discord review channel.
-2. A thread is automatically created from that message. The full draft is posted as the first thread message.
+1. The draft worker picks the next pending content item, calls Gemini to generate a Markdown draft, and creates a new thread in your Discord forum channel with the embed as the starter post.
+2. The full draft is posted as the first reply in that thread.
 3. You can type feedback freely in the thread — Gemini revises the draft and posts the updated version back.
 4. When you are happy, approve in one of two ways:
-   - React with **✅** on the original embed message, **or**
+   - React with **✅** on the forum post, **or**
    - Type an approval phrase in the thread (`publish`, `approve`, `lgtm`, `looks good`, `ship it`, `done`, `go ahead`, `deploy`).
 5. The final draft body is committed to GitHub and the deploy workflow is triggered automatically.
 
@@ -82,7 +82,8 @@ React with **❌** at any point to reject the draft (it is removed from the queu
 Enable **Developer Mode** in Discord: **Settings → Advanced → Developer Mode**.
 
 - Right-click your server icon → **Copy Server ID** → `DISCORD_GUILD_ID`
-- Right-click the review channel → **Copy Channel ID** → `DISCORD_CHANNEL_ID`
+- In your server, create a **Forum** channel (channel type: *Forum*) for reviews.
+- Right-click that forum channel → **Copy Channel ID** → `DISCORD_CHANNEL_ID`
 
 ### 3. Get a Gemini API key
 
@@ -132,8 +133,8 @@ The database schema is migrated automatically on first start. You will see outpu
 
 ### 7. Review and publish
 
-- Check your Discord review channel — an embed appears with a thread.
-- Open the thread to read the full draft.
+- Check your Discord forum channel — a new forum post appears for the draft.
+- Open the post thread to read the full draft.
 - Type feedback in the thread to request AI revisions.
 - When satisfied, type `publish` (or react ✅) to commit and deploy.
 
@@ -154,7 +155,7 @@ All configuration is read from environment variables. See `.env.example` for the
 | `GITHUB_WORKFLOW_ID` | | `deploy.yml` | Workflow filename to dispatch |
 | `DISCORD_BOT_TOKEN` | ✅ | — | Bot token (without `Bot` prefix) |
 | `DISCORD_GUILD_ID` | ✅ | — | Server (guild) ID |
-| `DISCORD_CHANNEL_ID` | ✅ | — | Review channel ID |
+| `DISCORD_CHANNEL_ID` | ✅ | — | Forum channel ID for review threads |
 | `DISCOVERY_INTERVAL_SECS` | | `86400` | How often to discover new content (seconds) |
 | `DRAFT_INTERVAL_SECS` | | `3600` | How often to generate a new draft (seconds) |
 

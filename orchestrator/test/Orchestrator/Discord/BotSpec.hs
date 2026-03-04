@@ -22,56 +22,53 @@ import Test.Hspec
 testThreadId :: ChannelId
 testThreadId = DiscordId (Snowflake 999)
 
--- | Simulate what 'drainQueue' does after posting a message: take the
+-- | Simulate what 'drainQueue' does after creating a forum thread: take the
 -- 'ReviewRequest' from the queue, build a 'PendingReview', and register it in
--- both maps under the supplied synthetic keys.
-simulateDrain :: DiscordConfig -> Text -> Text -> IO PendingReview
-simulateDrain cfg msgId threadId = do
+-- 'dcReviewMap' under the supplied synthetic key.  In a real forum channel the
+-- key is the thread/starter-message snowflake; here we use a caller-supplied
+-- string.
+simulateDrain :: DiscordConfig -> Text -> IO PendingReview
+simulateDrain cfg key = do
   req <- takeMVar (dcSendQueue cfg)
   bodyVar <- newTVarIO (rrBody req)
   let pr =
         PendingReview
           { prTitle = rrTitle req,
             prCurrentBody = bodyVar,
-            prMsgKey = msgId,
-            prThreadKey = threadId,
+            prKey = key,
             prThreadId = testThreadId,
             prRevise = rrRevise req,
             prApprove = rrApprove req,
             prReject = rrReject req
           }
-  atomically $ do
-    modifyTVar' (dcReviewMap cfg) (Map.insert msgId pr)
-    modifyTVar' (dcThreadMap cfg) (Map.insert threadId pr)
+  atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert key pr)
   pure pr
 
 -- | Simulate what 'eventHandler' does for a 'MessageReactionAdd': atomically
--- remove from both maps and return the 'PendingReview' so the caller can fire it.
+-- remove from 'dcReviewMap' and return the 'PendingReview' so the caller can
+-- fire callbacks.
 simulateReaction :: DiscordConfig -> Text -> IO (Maybe PendingReview)
-simulateReaction cfg msgId =
+simulateReaction cfg key =
   atomically $ do
     rm <- readTVar (dcReviewMap cfg)
-    case Map.lookup msgId rm of
+    case Map.lookup key rm of
       Nothing -> pure Nothing
       Just pr -> do
-        modifyTVar' (dcReviewMap cfg) (Map.delete (prMsgKey pr))
-        modifyTVar' (dcThreadMap cfg) (Map.delete (prThreadKey pr))
+        modifyTVar' (dcReviewMap cfg) (Map.delete (prKey pr))
         pure (Just pr)
 
--- | Simulate what 'eventHandler' does for a 'MessageCreate' inside a thread:
--- if 'isApprovalMessage' matches, deregister both maps and run 'prApprove';
+-- | Simulate what 'eventHandler' does for a 'MessageCreate' inside a forum thread:
+-- if 'isApprovalMessage' matches, deregister and run 'prApprove';
 -- otherwise run the revision and update 'prCurrentBody'.
 simulateThreadMessage :: DiscordConfig -> Text -> Text -> IO ()
-simulateThreadMessage cfg threadId content = do
-  tm <- readTVarIO (dcThreadMap cfg)
-  case Map.lookup threadId tm of
+simulateThreadMessage cfg key content = do
+  rm <- readTVarIO (dcReviewMap cfg)
+  case Map.lookup key rm of
     Nothing -> pure ()
     Just pr ->
       if isApprovalMessage content
         then do
-          atomically $ do
-            modifyTVar' (dcReviewMap cfg) (Map.delete (prMsgKey pr))
-            modifyTVar' (dcThreadMap cfg) (Map.delete threadId)
+          atomically $ modifyTVar' (dcReviewMap cfg) (Map.delete key)
           readTVarIO (prCurrentBody pr) >>= prApprove pr
         else do
           currentBody <- readTVarIO (prCurrentBody pr)
@@ -88,12 +85,10 @@ spec = do
       isEmpty <- isEmptyMVar (dcSendQueue cfg)
       isEmpty `shouldBe` True
 
-    it "creates a config with empty review and thread maps" $ do
+    it "creates a config with an empty review map" $ do
       cfg <- mkDiscordConfig "token" 123 456
       rm <- readTVarIO (dcReviewMap cfg)
-      tm <- readTVarIO (dcThreadMap cfg)
       Map.size rm `shouldBe` 0
-      Map.size tm `shouldBe` 0
 
   describe "isApprovalMessage" $ do
     it "recognises 'publish'" $
@@ -123,8 +118,8 @@ spec = do
       cfg <- mkDiscordConfig "token" 1 2
       result <- newIORef ("" :: Text)
       registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "original-body", rrRevise = \_ _ -> pure "", rrApprove = writeIORef result, rrReject = \_ -> pure ()}
-      pr <- simulateDrain cfg "msg-1" "thr-1"
-      Just pr' <- simulateReaction cfg "msg-1"
+      pr <- simulateDrain cfg "key-1"
+      Just pr' <- simulateReaction cfg "key-1"
       readTVarIO (prCurrentBody pr') >>= prApprove pr'
       readIORef result `shouldReturn` "original-body"
 
@@ -132,8 +127,8 @@ spec = do
       cfg <- mkDiscordConfig "token" 1 2
       rejectRef <- newIORef ("" :: Text)
       registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrRevise = \_ _ -> pure "", rrApprove = \_ -> pure (), rrReject = writeIORef rejectRef}
-      _ <- simulateDrain cfg "msg-2" "thr-2"
-      Just pr <- simulateReaction cfg "msg-2"
+      _ <- simulateDrain cfg "key-2"
+      Just pr <- simulateReaction cfg "key-2"
       prReject pr "\x274c"
       readIORef rejectRef `shouldReturn` "\x274c"
 
@@ -142,11 +137,10 @@ spec = do
       mapSizeRef <- newIORef (-1 :: Int)
       let onApprove _ = do
             rm <- readTVarIO (dcReviewMap cfg)
-            tm <- readTVarIO (dcThreadMap cfg)
-            writeIORef mapSizeRef (Map.size rm + Map.size tm)
+            writeIORef mapSizeRef (Map.size rm)
       registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrRevise = \_ _ -> pure "", rrApprove = onApprove, rrReject = \_ -> pure ()}
-      _ <- simulateDrain cfg "msg-3" "thr-3"
-      Just pr <- simulateReaction cfg "msg-3"
+      _ <- simulateDrain cfg "key-3"
+      Just pr <- simulateReaction cfg "key-3"
       readTVarIO (prCurrentBody pr) >>= prApprove pr
       readIORef mapSizeRef `shouldReturn` 0
 
@@ -157,13 +151,13 @@ spec = do
       registerForReview
         cfg
         ReviewRequest {rrTitle = "A", rrBody = "bodyA", rrRevise = \_ _ -> pure "", rrApprove = writeIORef resultA, rrReject = \_ -> writeIORef resultA "rejected"}
-      prA <- simulateDrain cfg "msg-A" "thr-A"
+      prA <- simulateDrain cfg "key-A"
       registerForReview
         cfg
         ReviewRequest {rrTitle = "B", rrBody = "bodyB", rrRevise = \_ _ -> pure "", rrApprove = writeIORef resultB, rrReject = writeIORef resultB}
-      prB <- simulateDrain cfg "msg-B" "thr-B"
-      Just _ <- simulateReaction cfg "msg-A"
-      Just _ <- simulateReaction cfg "msg-B"
+      prB <- simulateDrain cfg "key-B"
+      Just _ <- simulateReaction cfg "key-A"
+      Just _ <- simulateReaction cfg "key-B"
       readTVarIO (prCurrentBody prA) >>= prApprove prA
       prReject prB "\x274c"
       readIORef resultA `shouldReturn` "bodyA"
@@ -175,15 +169,15 @@ spec = do
       revCount <- newIORef (0 :: Int)
       let revise _body _feedback = modifyIORef revCount (+ 1) >> pure "revised"
       registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrRevise = revise, rrApprove = \_ -> pure (), rrReject = \_ -> pure ()}
-      _ <- simulateDrain cfg "msg-r1" "thr-r1"
-      simulateThreadMessage cfg "thr-r1" "please add more examples"
+      _ <- simulateDrain cfg "key-r1"
+      simulateThreadMessage cfg "key-r1" "please add more examples"
       readIORef revCount `shouldReturn` 1
 
     it "updates the current body after a revision" $ do
       cfg <- mkDiscordConfig "token" 1 2
       registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrRevise = \_ _ -> pure "revised", rrApprove = \_ -> pure (), rrReject = \_ -> pure ()}
-      pr <- simulateDrain cfg "msg-r2" "thr-r2"
-      simulateThreadMessage cfg "thr-r2" "make it shorter"
+      pr <- simulateDrain cfg "key-r2"
+      simulateThreadMessage cfg "key-r2" "make it shorter"
       readTVarIO (prCurrentBody pr) `shouldReturn` "revised"
 
     it "passes the LATEST body to onApprove after revisions" $ do
@@ -191,17 +185,15 @@ spec = do
       result <- newIORef ("" :: Text)
       -- First revision changes body to "revised"; second approval should fire with "revised".
       registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrRevise = \_ _ -> pure "revised", rrApprove = writeIORef result, rrReject = \_ -> pure ()}
-      _ <- simulateDrain cfg "msg-ap" "thr-ap"
-      simulateThreadMessage cfg "thr-ap" "add examples"
-      simulateThreadMessage cfg "thr-ap" "publish"
+      _ <- simulateDrain cfg "key-ap"
+      simulateThreadMessage cfg "key-ap" "add examples"
+      simulateThreadMessage cfg "key-ap" "publish"
       readIORef result `shouldReturn` "revised"
 
     it "removes both maps when approved via thread message" $ do
       cfg <- mkDiscordConfig "token" 1 2
       registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrRevise = \_ _ -> pure "", rrApprove = \_ -> pure (), rrReject = \_ -> pure ()}
-      _ <- simulateDrain cfg "msg-cl" "thr-cl"
-      simulateThreadMessage cfg "thr-cl" "looks good"
+      _ <- simulateDrain cfg "key-cl"
+      simulateThreadMessage cfg "key-cl" "looks good"
       rm <- readTVarIO (dcReviewMap cfg)
-      tm <- readTVarIO (dcThreadMap cfg)
       Map.size rm `shouldBe` 0
-      Map.size tm `shouldBe` 0
