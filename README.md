@@ -91,7 +91,14 @@ Create a free key at <https://aistudio.google.com/app/apikey> and copy it into `
 
 ### 4. Set up GitHub access (optional for local testing)
 
-Create a Personal Access Token at <https://github.com/settings/tokens/new> with the following scopes: `contents:write`, `actions:write`. Fill in the `GITHUB_*` variables. You may leave these blank during initial testing — the bot and discovery pipeline will work fine, and only the final commit step will log an error without crashing.
+Create a **classic** Personal Access Token at <https://github.com/settings/tokens/new> and enable these two scopes:
+
+- ✅ **`repo`** — full control of repositories (read/write file contents)
+- ✅ **`workflow`** — trigger and update GitHub Actions workflows
+
+> **Note:** the scopes above are for the classic token page. If you use a fine-grained PAT instead, the equivalent permissions are `Contents: Read and Write` and `Actions: Read and Write`.
+
+Fill in the `GITHUB_*` variables with the token and your repository details. You may leave these blank during initial testing — the bot and discovery pipeline will work fine, and only the final commit step will log an error without crashing.
 
 ### 5. Configure environment variables
 
