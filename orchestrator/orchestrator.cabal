@@ -88,6 +88,7 @@ executable orchestrator
   hs-source-dirs: app
   build-depends:
     envy >=2.1,
+    http-client >=0.7,
     http-client-tls >=0.3,
     orchestrator,
     persistent >=2.14,
@@ -118,6 +119,7 @@ test-suite orchestrator-test
   build-depends:
     QuickCheck >=2.14,
     containers >=0.6,
+    discord-haskell >=1.16,
     hspec >=2.10,
     hspec-discover >=2.10,
     monad-logger >=0.3,

@@ -6,6 +6,7 @@ module Orchestrator.AI.Client
     GeneratedDraft (..),
     discoverContent,
     generateDraft,
+    reviseDraft,
     extractText,
     splitTitle,
     toSlug,
@@ -89,6 +90,11 @@ discoverPrompt = TE.decodeUtf8 $(makeRelativeToProject "prompts/discover_content
 -- The literal @{{SOURCES}}@ is replaced at runtime with the formatted sources list.
 draftPromptTemplate :: Text
 draftPromptTemplate = TE.decodeUtf8 $(makeRelativeToProject "prompts/generate_draft.txt" >>= embedFile)
+
+-- | Prompt template for 'reviseDraft' – embedded from @prompts/revise_draft.txt@.
+-- The literals @{{DRAFT}}@ and @{{FEEDBACK}}@ are replaced at runtime.
+revisePromptTemplate :: Text
+revisePromptTemplate = TE.decodeUtf8 $(makeRelativeToProject "prompts/revise_draft.txt" >>= embedFile)
 
 -- ---------------------------------------------------------------------------
 -- Internal HTTP helpers
@@ -231,6 +237,46 @@ generateDraft cfg sources = do
             .= object
               [ "temperature" .= (0.7 :: Double),
                 "maxOutputTokens" .= (2048 :: Int)
+              ]
+        ]
+
+-- | Ask Gemini to revise an existing draft based on reviewer feedback.
+--
+-- The returned 'GeneratedDraft' has the same 'gdBranch' derived from the
+-- (possibly updated) title in the revised content.
+reviseDraft :: AiConfig -> Text -> Text -> Text -> IO GeneratedDraft
+reviseDraft cfg _title currentBody feedback = do
+  respBody <- postGemini cfg requestBody'
+  case eitherDecode respBody of
+    Left err -> ioError (userError $ "Gemini HTTP response parse error: " <> err)
+    Right v ->
+      case extractText v of
+        Nothing -> ioError (userError "Gemini: could not extract text from response")
+        Just mdText -> do
+          let (title', _) = splitTitle mdText
+              branch = "draft/" <> toSlug title'
+          pure
+            GeneratedDraft
+              { gdTitle = title',
+                gdBranch = branch,
+                gdBody = mdText
+              }
+  where
+    prompt =
+      T.replace "{{DRAFT}}" currentBody $
+        T.replace "{{FEEDBACK}}" feedback revisePromptTemplate
+    requestBody' =
+      object
+        [ "contents"
+            .= [ object
+                   [ "role" .= ("user" :: Text),
+                     "parts" .= [object ["text" .= prompt]]
+                   ]
+               ],
+          "generationConfig"
+            .= object
+              [ "temperature" .= (0.7 :: Double),
+                "maxOutputTokens" .= (4096 :: Int)
               ]
         ]
 

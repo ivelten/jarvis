@@ -8,22 +8,22 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import Database.Persist.Sql (entityVal)
+import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Orchestrator.AI.Client
   ( AiConfig (..),
     DiscoveredContent (..),
     GeneratedDraft (..),
-    discoverContent,
     generateDraft,
+    reviseDraft,
   )
 import Orchestrator.Database.Connection (DbPool, createPool, migrateDatabase, runDb)
 import Orchestrator.Database.Entities (RawContent (..))
 import Orchestrator.Discord.Bot
   ( DiscordConfig (..),
-    ReviewResult (..),
-    awaitReview,
+    ReviewRequest (..),
     mkDiscordConfig,
-    sendForReview,
+    registerForReview,
     startBot,
   )
 import Orchestrator.GitHub.Client (GitHubConfig (..), commitPost, triggerDeploy)
@@ -39,20 +39,34 @@ import System.IO (BufferMode (..), hSetBuffering, stdout)
 
 -- | Top-level configuration assembled from environment variables.
 data Config = Config
-  { cfgDbUrl :: !String,
+  { -- | PostgreSQL connection string (e.g. @postgresql://user:pass\@host:5432/db@).
+    cfgDbUrl :: !String,
+    -- | Google Gemini API key.
     cfgGeminiKey :: !Text,
+    -- | Gemini model name (default: @gemini-2.0-flash@).
     cfgGeminiModel :: !Text,
+    -- | GitHub Personal Access Token with @contents:write@ and @actions:write@.
     cfgGhToken :: !Text,
+    -- | GitHub organisation or user that owns the target repository.
     cfgGhOwner :: !Text,
+    -- | GitHub repository name (e.g. @daily-haskell@).
     cfgGhRepo :: !Text,
+    -- | Branch to commit posts to (default: @main@).
     cfgGhBranch :: !Text,
+    -- | Path inside the repo where Hugo posts live (default: @content/posts@).
     cfgGhPostsPath :: !Text,
+    -- | Filename of the GitHub Actions workflow to dispatch for deploys (default: @deploy.yml@).
     cfgGhWorkflowId :: !Text,
+    -- | Discord bot token (without the @Bot @ prefix).
     cfgDcBotToken :: !Text,
+    -- | Discord guild (server) ID where the review channel lives.
     cfgDcGuildId :: !Int,
+    -- | Discord channel ID where draft review messages are posted.
     cfgDcChannelId :: !Int,
-    -- | How often to run the pipeline, in seconds (default: 86400 = 1 day).
-    cfgIntervalSecs :: !Int
+    -- | How often to run the discovery step, in seconds (default: 86400 = 1 day).
+    cfgDiscoveryIntervalSecs :: !Int,
+    -- | How often to run the draft-generation step, in seconds (default: 3600 = 1 hour).
+    cfgDraftIntervalSecs :: !Int
   }
 
 instance FromEnv Config where
@@ -70,61 +84,61 @@ instance FromEnv Config where
       <*> env "DISCORD_BOT_TOKEN"
       <*> env "DISCORD_GUILD_ID"
       <*> env "DISCORD_CHANNEL_ID"
-      <*> (fromMaybe 86400 <$> envMaybe "PIPELINE_INTERVAL_SECS")
+      <*> (fromMaybe 86400 <$> envMaybe "DISCOVERY_INTERVAL_SECS")
+      <*> (fromMaybe 3600 <$> envMaybe "DRAFT_INTERVAL_SECS")
 
 -- ---------------------------------------------------------------------------
--- Pipeline
+-- Independent pipeline steps
 -- ---------------------------------------------------------------------------
 
--- | Run one full cycle of the orchestration pipeline:
---
---   1. Ask Gemini to discover new content and persist it.
---   2. Pick an unreviewed item from the queue.
---   3. Generate a Markdown draft.
---   4. Send the draft to Discord for review.
---   5. On approval, commit the post and trigger a deploy.
-runPipeline :: AiConfig -> GitHubConfig -> DiscordConfig -> DbPool -> IO ()
-runPipeline aiCfg ghCfg dcCfg pool = do
-  -- Step 1: discover & ingest
-  putStrLn "[Pipeline] Discovering content..."
+-- | Ask Gemini to discover new content and persist it to the database.
+-- Runs on its own schedule, independently of draft generation.
+runDiscovery :: AiConfig -> DbPool -> IO ()
+runDiscovery aiCfg pool = do
+  putStrLn "[Discovery] Discovering content via Gemini..."
   runDb pool (ingestDiscoveredContent aiCfg)
+  putStrLn "[Discovery] Done."
 
-  -- Step 2: pick a pending item
+-- | Pick the next pending content item, generate a Markdown draft, and
+-- register it for Discord review.  The approve/reject callbacks fire
+-- as soon as the reviewer reacts or types an approval in the Discord thread.
+runDraftGeneration :: AiConfig -> GitHubConfig -> DiscordConfig -> DbPool -> IO ()
+runDraftGeneration aiCfg ghCfg dcCfg pool = do
   pending <- runDb pool pendingContent
   case pending of
-    [] -> putStrLn "[Pipeline] No pending content to process. Skipping."
-    (item : _) -> do
-      let rc = entityVal item
-
-      -- Step 3: generate draft
-      putStrLn $ "[Pipeline] Generating draft for: " <> T.unpack (rawContentTitle rc)
+    [] -> putStrLn "[Drafts] No pending content to process. Skipping."
+    (item : _) -> processDraft (entityVal item)
+  where
+    processDraft rc = do
+      putStrLn $ "[Drafts] Generating draft for: " <> T.unpack (rawContentTitle rc)
       draft <- generateDraft aiCfg [rcToDiscovered rc]
       now <- getCurrentTime
+      let title = gdTitle draft
+          slug = toSlug title
+          filename = slug <> ".md"
+          revise currentBody feedback =
+            gdBody <$> reviseDraft aiCfg title currentBody feedback
+      putStrLn "[Drafts] Draft sent to Discord for review."
+      registerForReview
+        dcCfg
+        ReviewRequest
+          { rrTitle = title,
+            rrBody = gdBody draft,
+            rrRevise = revise,
+            rrApprove = onApprove filename title slug now,
+            rrReject = onReject
+          }
 
-      let filename = toSlug (gdTitle draft) <> ".md"
-          mdContent =
-            renderHugoPost
-              (gdTitle draft)
-              (toSlug (gdTitle draft))
-              now
-              []
-              (gdBody draft)
+    onApprove filename title slug now finalBody = do
+      let mdContent = renderHugoPost title slug now [] finalBody
+      putStrLn $ "[Drafts] Approved! Committing " <> T.unpack filename <> " to GitHub..."
+      commitPost ghCfg filename mdContent
+      putStrLn "[Drafts] Triggering deploy workflow..."
+      triggerDeploy ghCfg
+      putStrLn "[Drafts] Deployed."
 
-      -- Step 4: Discord review
-      putStrLn "[Pipeline] Sending draft for review on Discord..."
-      msgId <- sendForReview dcCfg (gdTitle draft) (gdBody draft)
-      result <- awaitReview dcCfg msgId
-
-      case result of
-        Rejected reason ->
-          putStrLn $ "[Pipeline] Draft rejected: " <> T.unpack reason
-        Approved -> do
-          -- Step 5: commit & deploy
-          putStrLn "[Pipeline] Approved! Committing post to GitHub..."
-          commitPost ghCfg filename mdContent
-          putStrLn "[Pipeline] Triggering deploy workflow..."
-          triggerDeploy ghCfg
-          putStrLn "[Pipeline] Done."
+    onReject reason =
+      putStrLn $ "[Drafts] Draft rejected: " <> T.unpack reason
 
 -- ---------------------------------------------------------------------------
 -- Utilities
@@ -153,6 +167,40 @@ toSlug =
 sleepSecs :: Int -> IO ()
 sleepSecs n = threadDelay (n * 1_000_000)
 
+-- | Run an action immediately, then repeat it on a fixed interval.
+-- Exceptions are caught, logged with the given prefix, and the loop continues.
+scheduledLoop :: String -> Int -> IO () -> IO ()
+scheduledLoop prefix intervalSecs action = do
+  result <- try action :: IO (Either SomeException ())
+  case result of
+    Left ex -> putStrLn $ prefix <> " Error: " <> show ex
+    Right () -> pure ()
+  putStrLn $ prefix <> " Sleeping for " <> show intervalSecs <> "s."
+  sleepSecs intervalSecs
+  scheduledLoop prefix intervalSecs action
+
+-- | Build an 'AiConfig' from the top-level config and a shared HTTP manager.
+mkAiConfig :: Config -> Manager -> AiConfig
+mkAiConfig cfg manager =
+  AiConfig
+    { aiApiKey = cfgGeminiKey cfg,
+      aiModel = cfgGeminiModel cfg,
+      aiManager = manager
+    }
+
+-- | Build a 'GitHubConfig' from the top-level config and a shared HTTP manager.
+mkGhConfig :: Config -> Manager -> GitHubConfig
+mkGhConfig cfg manager =
+  GitHubConfig
+    { ghToken = cfgGhToken cfg,
+      ghRepoOwner = cfgGhOwner cfg,
+      ghRepoName = cfgGhRepo cfg,
+      ghBranch = cfgGhBranch cfg,
+      ghPostsPath = cfgGhPostsPath cfg,
+      ghWorkflowId = cfgGhWorkflowId cfg,
+      ghManager = manager
+    }
+
 -- ---------------------------------------------------------------------------
 -- Entry point
 -- ---------------------------------------------------------------------------
@@ -162,64 +210,40 @@ main = do
   hSetBuffering stdout LineBuffering
   putStrLn "[Jarvis] Starting orchestrator..."
 
-  -- Load all configuration from environment variables.
-  cfg <-
-    decodeEnv >>= \case
-      Left err -> do
-        putStrLn $ "[Jarvis] Configuration error: " <> err
-        exitFailure
-      Right c -> pure c
-
-  -- One shared TLS-capable HTTP manager for Gemini and GitHub calls.
+  cfg <- loadConfig
   manager <- newTlsManager
 
-  let aiCfg =
-        AiConfig
-          { aiApiKey = cfgGeminiKey cfg,
-            aiModel = cfgGeminiModel cfg,
-            aiManager = manager
-          }
-      ghCfg =
-        GitHubConfig
-          { ghToken = cfgGhToken cfg,
-            ghRepoOwner = cfgGhOwner cfg,
-            ghRepoName = cfgGhRepo cfg,
-            ghBranch = cfgGhBranch cfg,
-            ghPostsPath = cfgGhPostsPath cfg,
-            ghWorkflowId = cfgGhWorkflowId cfg,
-            ghManager = manager
-          }
+  let aiCfg = mkAiConfig cfg manager
+      ghCfg = mkGhConfig cfg manager
 
-  -- Allocate the Discord bot config with its internal communication state.
   dcCfg <-
     mkDiscordConfig
       (cfgDcBotToken cfg)
       (fromIntegral (cfgDcGuildId cfg))
       (fromIntegral (cfgDcChannelId cfg))
 
-  -- Set up the database pool and run schema migrations.
   pool <- createPool (BC.pack (cfgDbUrl cfg))
   migrateDatabase pool
   putStrLn "[Jarvis] Database ready."
 
-  -- Start the Discord bot event loop in a background thread.
-  _ <- forkIO $ startBot dcCfg
-  putStrLn "[Jarvis] Discord bot started."
+  _ <-
+    forkIO $
+      scheduledLoop
+        "[Discovery]"
+        (cfgDiscoveryIntervalSecs cfg)
+        (runDiscovery aiCfg pool)
 
-  -- Run the pipeline immediately, then on a repeating schedule.
-  let loop = do
-        result <-
-          try (runPipeline aiCfg ghCfg dcCfg pool) ::
-            IO (Either SomeException ())
-        case result of
-          Left ex -> putStrLn $ "[Jarvis] Pipeline error: " <> show ex
-          Right () -> pure ()
-        putStrLn $
-          "[Jarvis] Sleeping for "
-            <> show (cfgIntervalSecs cfg)
-            <> " seconds until next run."
-        sleepSecs (cfgIntervalSecs cfg)
-        loop
+  _ <-
+    forkIO $
+      scheduledLoop
+        "[Drafts]"
+        (cfgDraftIntervalSecs cfg)
+        (runDraftGeneration aiCfg ghCfg dcCfg pool)
 
-  putStrLn "[Jarvis] Orchestrator running."
-  loop
+  putStrLn "[Jarvis] All workers started. Discord bot running..."
+  startBot dcCfg
+  where
+    loadConfig =
+      decodeEnv >>= \case
+        Left err -> putStrLn ("[Jarvis] Configuration error: " <> err) >> exitFailure
+        Right c -> pure c
