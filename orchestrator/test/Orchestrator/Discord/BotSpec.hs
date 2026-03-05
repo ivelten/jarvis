@@ -197,3 +197,29 @@ spec = do
       simulateThreadMessage cfg "key-cl" "looks good"
       rm <- readTVarIO (dcReviewMap cfg)
       Map.size rm `shouldBe` 0
+
+  describe "chunkText" $ do
+    it "returns a single chunk when text fits within the limit" $
+      chunkText 20 "hello world" `shouldBe` ["hello world"]
+
+    it "splits on the last paragraph boundary" $
+      chunkText 15 "paragraph one\n\nparagraph two\n\nparagraph three"
+        `shouldBe` ["paragraph one", "paragraph two", "paragraph three"]
+
+    it "splits on the last line boundary when no paragraph fits" $
+      chunkText 25 "line one\nline two\nline three"
+        `shouldBe` ["line one\nline two", "line three"]
+
+    it "splits on the last word boundary when no line break fits" $
+      chunkText 20 "one two three four five six"
+        `shouldBe` ["one two three four", "five six"]
+
+    it "hard cuts only when there is no whitespace" $
+      chunkText 5 "abcdefghij" `shouldBe` ["abcde", "fghij"]
+
+    it "does not produce empty chunks" $
+      notElem "" (chunkText 10 "hello\n\nworld") `shouldBe` True
+
+    it "closes and reopens a code fence when splitting inside it" $
+      chunkText 20 "```haskell\nfoo\nbar\nbaz\n```"
+        `shouldBe` ["```haskell\nfoo\nbar\n\n```", "```haskell\nbaz\n```"]

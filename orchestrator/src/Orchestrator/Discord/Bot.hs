@@ -7,11 +7,12 @@ module Orchestrator.Discord.Bot
     mkDiscordConfig,
     registerForReview,
     isApprovalMessage,
+    chunkText,
     startBot,
   )
 where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception (SomeException, try)
@@ -20,6 +21,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask, runReaderT)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 import Discord
@@ -169,9 +171,9 @@ drainQueue hdl cfg = forever $ do
       embed =
         def
           { createEmbedTitle = rrTitle,
-            createEmbedDescription = T.take 500 rrBody,
+            createEmbedDescription = mkEmbedPreview 500 rrBody,
             createEmbedFooterText =
-              "React \x2705 to approve, \x274c to reject, or type feedback in the thread."
+              "React " <> emojiApprove <> " to approve, " <> emojiReject <> " to reject, or type feedback in the thread."
           }
       forumMsg =
         StartThreadForumMediaMessage
@@ -196,11 +198,11 @@ drainQueue hdl cfg = forever $ do
           key = showId tid
           -- In a forum channel the starter message ID equals the thread ID.
           starterMsgId = DiscordId (unId tid) :: MessageId
-      -- Post full draft body as the first thread reply.
-      void $
-        runReaderT
-          (restCall (CreateMessage tid ("\x1f4dd **Draft:**\n\n" <> T.take 1_900 rrBody)))
-          hdl
+      -- Post full draft body as the first thread reply (split across messages if needed).
+      postChunked hdl tid (emojiDraft <> " **Draft:**\n\n") rrBody
+      -- Wait before adding reactions so they don't compete for the rate-limit
+      -- bucket with the last draft chunk.
+      threadDelay 2_000_000
       -- Build and register the PendingReview.
       bodyVar <- newTVarIO rrBody
       let pr =
@@ -215,14 +217,10 @@ drainQueue hdl cfg = forever $ do
               }
       atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert key pr)
       -- Add reaction affordances to the forum thread starter message.
-      void $
-        runReaderT
-          (restCall (CreateReaction (chanId, starterMsgId) "\x2705"))
-          hdl
-      void $
-        runReaderT
-          (restCall (CreateReaction (chanId, starterMsgId) "\x274c"))
-          hdl
+      -- The starter message lives inside the thread channel (tid), not the
+      -- parent forum channel (chanId).
+      restCallIO hdl (CreateReaction (tid, starterMsgId) emojiApprove)
+      restCallIO hdl (CreateReaction (tid, starterMsgId) emojiReject)
 
 -- | Handle incoming Discord events.
 --
@@ -244,7 +242,7 @@ eventHandler cfg (MessageReactionAdd ri) = do
       Nothing -> pure ()
       Just pr ->
         liftIO $
-          if emoji == "\x2705"
+          if emoji == emojiApprove
             then readTVarIO (prCurrentBody pr) >>= prApprove pr
             else prReject pr emoji
 -- \| Thread-message-based revision / approval.
@@ -293,14 +291,11 @@ handleRevision pr feedback = do
         restCall $
           CreateMessage
             (prThreadId pr)
-            ("\x26a0\xfe0f Could not revise draft: " <> T.pack (show ex))
+            (emojiWarning <> " Could not revise draft: " <> T.pack (show ex))
     Right newBody -> do
       liftIO $ atomically $ writeTVar (prCurrentBody pr) newBody
-      void $
-        restCall $
-          CreateMessage
-            (prThreadId pr)
-            ("\x270f\xfe0f **Revised draft:**\n\n" <> T.take 1_900 newBody)
+      hdl <- ask
+      liftIO $ postChunked hdl (prThreadId pr) (emojiRevise <> " **Revised draft:**\n\n") newBody
 
 -- ---------------------------------------------------------------------------
 -- Utilities
@@ -313,3 +308,128 @@ mkChannelId w = DiscordId (Snowflake (fromIntegral w))
 -- | Render any Discord snowflake-based ID to text for use as a map key.
 showId :: DiscordId a -> Text
 showId i = T.pack $ show $ unSnowflake $ unId i
+
+-- | Fire a Discord REST call via a raw handle, discarding the result.
+restCallIO :: (FromJSON a) => DiscordHandle -> ChannelRequest a -> IO ()
+restCallIO hdl req = void $ runReaderT (restCall req) hdl
+
+-- Discord emoji constants -------------------------------------------------
+
+emojiApprove, emojiReject, emojiDraft, emojiRevise, emojiWarning :: Text
+emojiApprove = "\x2705" -- ✅
+emojiReject = "\x274c" -- ❌
+emojiDraft = "\x1f4dd" -- 📝
+emojiRevise = "\x270f\xfe0f" -- ✏️
+emojiWarning = "\x26a0\xfe0f" -- ⚠️
+
+-- | Truncate body text to at most @maxLen@ characters at a word boundary,
+-- stripping trailing punctuation and appending '\x2026' (…) when truncated.
+mkEmbedPreview :: Int -> Text -> Text
+mkEmbedPreview maxLen body
+  | T.length body <= maxLen = body
+  | otherwise =
+      let window = T.take maxLen body
+          trimmed = case T.breakOnEnd " " window of
+            (pre, _) | not (T.null pre) -> T.dropWhileEnd (== ' ') pre
+            _ -> window
+          clean = T.dropWhileEnd (`elem` (",;:—-" :: String)) trimmed
+       in clean <> "\x2026"
+
+-- | Split 'Text' into chunks of at most @maxLen@ characters.
+-- Break priority (highest to lowest):
+--   1. Last @\\n\\n@ paragraph boundary within the window
+--   2. Last @\\n@ line boundary within the window
+--   3. Last word boundary (space) within the window
+--   4. Hard cut at @maxLen@ (only when no whitespace exists at all,
+--      e.g. an extremely long URL or code token)
+chunkText :: Int -> Text -> [Text]
+chunkText maxLen = filter (not . T.null) . map T.strip . go
+  where
+    go t
+      | T.length t <= maxLen = [t]
+      | otherwise =
+          let window = T.take maxLen t
+              remaining = T.drop maxLen t
+              (chunk, leftover) = bestSplit window
+           in case currentFenceOpener chunk of
+                Nothing ->
+                  chunk : go (leftover <> remaining)
+                Just opener ->
+                  -- Split inside a code fence: close it here, reopen next chunk.
+                  (chunk <> "\n```") : go (opener <> "\n" <> leftover <> remaining)
+
+    bestSplit window =
+      case breakLast "\n\n" window of
+        Just p -> p
+        Nothing -> case breakLast "\n" window of
+          Just p -> p
+          Nothing -> fromMaybe (window, "") (breakLastWord window)
+
+    -- \| Returns the opening fence line (e.g. @\"```haskell\"@) when @t@ ends
+    -- inside an open code fence, or 'Nothing' if we are outside a fence.
+    -- Walks through lines treating any @```@-prefixed line as a toggle.
+    currentFenceOpener :: Text -> Maybe Text
+    currentFenceOpener = stepLines Nothing . T.lines
+      where
+        stepLines state [] = state
+        stepLines Nothing (l : ls)
+          | "```" `T.isPrefixOf` T.strip l = stepLines (Just (T.strip l)) ls
+          | otherwise = stepLines Nothing ls
+        stepLines (Just opener) (l : ls)
+          | T.strip l == "```" = stepLines Nothing ls
+          | otherwise = stepLines (Just opener) ls
+
+    -- \| Split at the last occurrence of @sep@, returning
+    -- @(part before and including sep, part after sep)@.
+    breakLast sep t =
+      let parts = T.splitOn sep t
+       in if length parts <= 1
+            then Nothing
+            else Just (T.intercalate sep (init parts) <> sep, last parts)
+
+    -- \| Split at the last space in @t@, returning
+    -- @(part up to and including the space, part after the space)@.
+    -- Returns 'Nothing' when there is no space in @t@.
+    breakLastWord t =
+      case T.breakOnEnd " " t of
+        ("", _) -> Nothing
+        (pre, suf) -> Just (pre, suf)
+
+-- | Post a (potentially long) body to a Discord channel, splitting it into
+-- multiple messages of at most 1900 characters each. The @header@ is
+-- prepended to the first message only.
+--
+-- A 2-second delay is inserted between consecutive messages to stay well
+-- within Discord's per-channel rate limit (5 messages / 5 seconds).
+postChunked :: DiscordHandle -> ChannelId -> Text -> Text -> IO ()
+postChunked hdl tid header body = do
+  let chunks = chunkText 1_900 body
+      messages = case chunks of
+        [] -> [header]
+        (c : cs) -> (header <> c) : cs
+      total = length messages
+  putStrLn $
+    "[Discord] Sending draft in "
+      <> show total
+      <> " message(s), body length: "
+      <> show (T.length body)
+      <> " chars."
+  mapM_ send (zip [1 :: Int ..] messages)
+  where
+    send (i, msg) = do
+      when (i > 1) $ threadDelay 2_000_000 -- 2 s between messages
+      result <- runReaderT (restCall (CreateMessage tid msg)) hdl
+      case result of
+        Left err ->
+          putStrLn $
+            "[Discord] Failed to send message chunk "
+              <> show i
+              <> ": "
+              <> show err
+        Right _ ->
+          putStrLn $
+            "[Discord] Sent chunk "
+              <> show i
+              <> " ("
+              <> show (T.length msg)
+              <> " chars)."

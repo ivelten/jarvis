@@ -118,9 +118,31 @@ postGemini cfg body = do
         initReq
           { method = "POST",
             requestBody = RequestBodyLBS (encode body),
-            requestHeaders = [("Content-Type", "application/json")]
+            requestHeaders = [("Content-Type", "application/json")],
+            responseTimeout = responseTimeoutMicro (180 * 1_000_000)
           }
   responseBody <$> httpLbs req (aiManager cfg)
+
+-- | POST a request body to Gemini and return the extracted text, raising an
+-- 'IOError' on HTTP errors, API error responses, or missing content.
+callGemini :: AiConfig -> Value -> IO Text
+callGemini cfg body = do
+  respBody <- postGemini cfg body
+  case eitherDecode respBody of
+    Left err -> ioError (userError $ "Gemini HTTP response parse error: " <> err)
+    Right v -> do
+      checkGeminiError v
+      case extractText v of
+        Nothing -> ioError (userError "Gemini: could not extract text from response")
+        Just txt -> pure txt
+
+-- | Build a @contents@ array with a single user turn.
+userContents :: Text -> Value
+userContents prompt =
+  object
+    [ "role" .= ("user" :: Text),
+      "parts" .= [object ["text" .= prompt]]
+    ]
 
 -- | Extract the text payload from the first candidate's first part.
 --   Gemini wraps generated content in:
@@ -176,6 +198,14 @@ stripFences t =
         _ -> ls
    in T.strip (T.unlines trimmed)
 
+-- | Generation parameters shared by the draft and revision calls.
+defaultGenerationConfig :: Value
+defaultGenerationConfig =
+  object
+    [ "temperature" .= (0.7 :: Double),
+      "maxOutputTokens" .= (8192 :: Int)
+    ]
+
 -- ---------------------------------------------------------------------------
 -- Public API
 -- ---------------------------------------------------------------------------
@@ -184,26 +214,14 @@ stripFences t =
 --   content and return it as a structured list.
 discoverContent :: AiConfig -> IO [DiscoveredContent]
 discoverContent cfg = do
-  respBody <- postGemini cfg requestBody'
-  case eitherDecode respBody of
-    Left err -> ioError (userError $ "Gemini HTTP response parse error: " <> err)
-    Right v -> do
-      checkGeminiError v
-      case extractText v of
-        Nothing -> ioError (userError "Gemini: could not extract text from response")
-        Just txt -> decodeText (stripFences txt)
+  txt <- callGemini cfg requestBody'
+  decodeText (stripFences txt)
   where
-    prompt = discoverPrompt
+    -- google_search grounding is incompatible with responseMimeType/responseSchema
+    -- JSON mode; the prompt instructs the model to return JSON directly.
     requestBody' =
       object
-        [ "contents"
-            .= [ object
-                   [ "role" .= ("user" :: Text),
-                     "parts" .= [object ["text" .= prompt]]
-                   ]
-               ],
-          -- google_search grounding is incompatible with responseMimeType/responseSchema
-          -- JSON mode; the prompt instructs the model to return JSON directly.
+        [ "contents" .= [userContents discoverPrompt],
           "tools" .= [object ["google_search" .= object []]]
         ]
 
@@ -211,26 +229,11 @@ discoverContent cfg = do
 --   content sources.
 generateDraft :: AiConfig -> [DiscoveredContent] -> IO GeneratedDraft
 generateDraft cfg sources = do
-  respBody <- postGemini cfg requestBody'
-  case eitherDecode respBody of
-    Left err -> ioError (userError $ "Gemini HTTP response parse error: " <> err)
-    Right v -> do
-      checkGeminiError v
-      case extractText v of
-        Nothing -> ioError (userError "Gemini: could not extract text from response")
-        Just mdText -> do
-          let (title, _rest) = splitTitle mdText
-              branch = "draft/" <> toSlug title
-          pure
-            GeneratedDraft
-              { gdTitle = title,
-                gdBranch = branch,
-                gdBody = mdText
-              }
+  mdText <- callGemini cfg requestBody'
+  let (title, _) = splitTitle mdText
+  pure GeneratedDraft {gdTitle = title, gdBranch = "draft/" <> toSlug title, gdBody = mdText}
   where
-    sourcesBlock =
-      T.unlines $
-        zipWith formatSource ([1 ..] :: [Int]) sources
+    sourcesBlock = T.unlines $ zipWith formatSource ([1 ..] :: [Int]) sources
     formatSource i dc =
       T.pack (show i)
         <> ". **"
@@ -242,17 +245,8 @@ generateDraft cfg sources = do
     prompt = T.replace "{{SOURCES}}" sourcesBlock draftPromptTemplate
     requestBody' =
       object
-        [ "contents"
-            .= [ object
-                   [ "role" .= ("user" :: Text),
-                     "parts" .= [object ["text" .= prompt]]
-                   ]
-               ],
-          "generationConfig"
-            .= object
-              [ "temperature" .= (0.7 :: Double),
-                "maxOutputTokens" .= (2048 :: Int)
-              ]
+        [ "contents" .= [userContents prompt],
+          "generationConfig" .= defaultGenerationConfig
         ]
 
 -- | Ask Gemini to revise an existing draft based on reviewer feedback.
@@ -261,39 +255,17 @@ generateDraft cfg sources = do
 -- (possibly updated) title in the revised content.
 reviseDraft :: AiConfig -> Text -> Text -> Text -> IO GeneratedDraft
 reviseDraft cfg _title currentBody feedback = do
-  respBody <- postGemini cfg requestBody'
-  case eitherDecode respBody of
-    Left err -> ioError (userError $ "Gemini HTTP response parse error: " <> err)
-    Right v -> do
-      checkGeminiError v
-      case extractText v of
-        Nothing -> ioError (userError "Gemini: could not extract text from response")
-        Just mdText -> do
-          let (title', _) = splitTitle mdText
-              branch = "draft/" <> toSlug title'
-          pure
-            GeneratedDraft
-              { gdTitle = title',
-                gdBranch = branch,
-                gdBody = mdText
-              }
+  mdText <- callGemini cfg requestBody'
+  let (title', _) = splitTitle mdText
+  pure GeneratedDraft {gdTitle = title', gdBranch = "draft/" <> toSlug title', gdBody = mdText}
   where
     prompt =
       T.replace "{{DRAFT}}" currentBody $
         T.replace "{{FEEDBACK}}" feedback revisePromptTemplate
     requestBody' =
       object
-        [ "contents"
-            .= [ object
-                   [ "role" .= ("user" :: Text),
-                     "parts" .= [object ["text" .= prompt]]
-                   ]
-               ],
-          "generationConfig"
-            .= object
-              [ "temperature" .= (0.7 :: Double),
-                "maxOutputTokens" .= (4096 :: Int)
-              ]
+        [ "contents" .= [userContents prompt],
+          "generationConfig" .= defaultGenerationConfig
         ]
 
 -- ---------------------------------------------------------------------------

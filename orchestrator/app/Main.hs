@@ -7,7 +7,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import Database.Persist.Sql (entityVal)
+import Database.Persist.Sql (entityKey, entityVal, update, (=.))
 import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Orchestrator.AI.Client
@@ -16,9 +16,11 @@ import Orchestrator.AI.Client
     GeneratedDraft (..),
     generateDraft,
     reviseDraft,
+    toSlug,
   )
 import Orchestrator.Database.Connection (DbPool, createPool, migrateDatabase, runDb)
-import Orchestrator.Database.Entities (RawContent (..))
+import Orchestrator.Database.Entities
+import Orchestrator.Database.Models (ContentStatus (..))
 import Orchestrator.Discord.Bot
   ( DiscordConfig (..),
     ReviewRequest (..),
@@ -107,9 +109,9 @@ runDraftGeneration aiCfg ghCfg dcCfg pool = do
   pending <- runDb pool pendingContent
   case pending of
     [] -> putStrLn "[Drafts] No pending content to process. Skipping."
-    (item : _) -> processDraft (entityVal item)
+    (item : _) -> processDraft (entityKey item) (entityVal item)
   where
-    processDraft rc = do
+    processDraft rcKey rc = do
       putStrLn $ "[Drafts] Generating draft for: " <> T.unpack (rawContentTitle rc)
       draft <- generateDraft aiCfg [rcToDiscovered rc]
       now <- getCurrentTime
@@ -118,6 +120,13 @@ runDraftGeneration aiCfg ghCfg dcCfg pool = do
           filename = slug <> ".md"
           revise currentBody feedback =
             gdBody <$> reviseDraft aiCfg title currentBody feedback
+      -- Mark as drafted immediately so restarts don't re-pick this item.
+      runDb pool $
+        update
+          rcKey
+          [ RawContentStatus =. ContentDrafted,
+            RawContentUpdatedAt =. now
+          ]
       putStrLn "[Drafts] Draft sent to Discord for review."
       registerForReview
         dcCfg
@@ -126,7 +135,7 @@ runDraftGeneration aiCfg ghCfg dcCfg pool = do
             rrBody = gdBody draft,
             rrRevise = revise,
             rrApprove = onApprove filename title slug now,
-            rrReject = onReject
+            rrReject = onReject rcKey
           }
 
     onApprove filename title slug now finalBody = do
@@ -137,7 +146,14 @@ runDraftGeneration aiCfg ghCfg dcCfg pool = do
       triggerDeploy ghCfg
       putStrLn "[Drafts] Deployed."
 
-    onReject reason =
+    onReject rcKey reason = do
+      rejectedAt <- getCurrentTime
+      runDb pool $
+        update
+          rcKey
+          [ RawContentStatus =. ContentRejected,
+            RawContentUpdatedAt =. rejectedAt
+          ]
       putStrLn $ "[Drafts] Draft rejected: " <> T.unpack reason
 
 -- ---------------------------------------------------------------------------
@@ -154,14 +170,6 @@ rcToDiscovered rc =
       dcSummary = rawContentSummary rc,
       dcSubject = Nothing
     }
-
--- | Convert a post title to a URL-safe slug for filenames.
-toSlug :: Text -> Text
-toSlug =
-  T.intercalate "-"
-    . filter (not . T.null)
-    . T.splitOn " "
-    . T.toLower
 
 -- | Sleep for @n@ seconds (converts to microseconds for 'threadDelay').
 sleepSecs :: Int -> IO ()
