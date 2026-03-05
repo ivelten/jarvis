@@ -1,5 +1,11 @@
 module Orchestrator.GitHub.Client
   ( GitHubConfig (..),
+    CommitRequest (..),
+    defaultApiBase,
+    ghHeaders,
+    contentsPath,
+    buildCommitBody,
+    buildDeployBody,
     commitPost,
     triggerDeploy,
   )
@@ -35,16 +41,32 @@ data GitHubConfig = GitHubConfig
     ghPostsPath :: !Text,
     -- | Workflow filename to dispatch after publishing, e.g. @"deploy.yml"@.
     ghWorkflowId :: !Text,
-    ghManager :: !Manager
+    ghManager :: !Manager,
+    -- | API base URL.  Override in tests to point at a local mock server;
+    --   production code should use 'defaultApiBase'.
+    ghApiBase :: !Text
+  }
+
+-- | Parameters for a single file commit via the GitHub Contents API.
+data CommitRequest = CommitRequest
+  { -- | Branch to commit to.
+    crBranch :: !Text,
+    -- | Filename (used in the commit message and URL).
+    crFilename :: !Text,
+    -- | Markdown content; will be base64-encoded before sending.
+    crContent :: !Text,
+    -- | Existing file SHA; 'Nothing' creates a new file, 'Just' updates it.
+    crSha :: !(Maybe Text)
   }
 
 -- ---------------------------------------------------------------------------
 -- Configuration
 -- ---------------------------------------------------------------------------
 
--- | Base URL for the GitHub REST API.
-apiBase :: String
-apiBase = "https://api.github.com"
+-- | Default base URL for the GitHub REST API.
+-- Override 'ghApiBase' in 'GitHubConfig' when pointing at a mock server.
+defaultApiBase :: Text
+defaultApiBase = "https://api.github.com"
 
 -- | Standard request headers required by the GitHub API.
 ghHeaders :: GitHubConfig -> RequestHeaders
@@ -60,10 +82,10 @@ ghHeaders GitHubConfig {..} =
 -- ---------------------------------------------------------------------------
 
 -- | Build the Contents API path for a post file.
---   Result: @/repos/{owner}/{repo}/contents/{postsPath}/{filename}@
+--   Result: @{apiBase}/repos/{owner}/{repo}/contents/{postsPath}/{filename}@
 contentsPath :: GitHubConfig -> Text -> String
 contentsPath GitHubConfig {..} filename =
-  apiBase
+  T.unpack ghApiBase
     <> "/repos/"
     <> T.unpack ghRepoOwner
     <> "/"
@@ -92,6 +114,27 @@ getFileSha cfg filename = do
 -- Public API
 -- ---------------------------------------------------------------------------
 
+-- | Build the JSON request body for a Contents API PUT (create or update).
+--
+-- Exported for testing; most callers should use 'commitPost' directly.
+buildCommitBody :: CommitRequest -> Value
+buildCommitBody CommitRequest {..} =
+  let encodedContent = TE.decodeUtf8 . B64.encode . TE.encodeUtf8 $ crContent
+      baseFields =
+        [ "message" .= ("feat(posts): publish " <> crFilename),
+          "content" .= encodedContent,
+          "branch" .= crBranch
+        ]
+   in object $ case crSha of
+        Nothing -> baseFields
+        Just sha -> baseFields <> ["sha" .= sha]
+
+-- | Build the JSON request body for a workflow dispatch event.
+--
+-- Exported for testing; most callers should use 'triggerDeploy' directly.
+buildDeployBody :: Text -> Value
+buildDeployBody branch = object ["ref" .= branch]
+
 -- | Commit a new (or updated) Hugo post Markdown file to the repository.
 --
 -- Uses the GitHub Contents API so no local @git@ binary is required.
@@ -106,16 +149,14 @@ commitPost ::
   IO ()
 commitPost cfg filename content = do
   mSha <- getFileSha cfg filename
-  let encodedContent =
-        TE.decodeUtf8 . B64.encode . TE.encodeUtf8 $ content
-      bodyFields =
-        [ "message" .= ("feat(posts): publish " <> filename),
-          "content" .= encodedContent,
-          "branch" .= ghBranch cfg
-        ]
-      body = object $ case mSha of
-        Nothing -> bodyFields
-        Just sha -> bodyFields <> ["sha" .= sha]
+  let body =
+        buildCommitBody
+          CommitRequest
+            { crBranch = ghBranch cfg,
+              crFilename = filename,
+              crContent = content,
+              crSha = mSha
+            }
   initReq <- parseRequest (contentsPath cfg filename)
   let req =
         initReq
@@ -142,7 +183,7 @@ commitPost cfg filename content = do
 triggerDeploy :: GitHubConfig -> IO ()
 triggerDeploy cfg@GitHubConfig {..} = do
   let url =
-        apiBase
+        T.unpack ghApiBase
           <> "/repos/"
           <> T.unpack ghRepoOwner
           <> "/"
@@ -150,7 +191,7 @@ triggerDeploy cfg@GitHubConfig {..} = do
           <> "/actions/workflows/"
           <> T.unpack ghWorkflowId
           <> "/dispatches"
-      body = object ["ref" .= ghBranch]
+      body = buildDeployBody ghBranch
   initReq <- parseRequest url
   let req =
         initReq

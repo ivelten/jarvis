@@ -28,7 +28,7 @@ import Orchestrator.Discord.Bot
     registerForReview,
     startBot,
   )
-import Orchestrator.GitHub.Client (GitHubConfig (..), commitPost, triggerDeploy)
+import Orchestrator.GitHub.Client (GitHubConfig (..), commitPost, defaultApiBase, triggerDeploy)
 import Orchestrator.Posts.Generator (renderHugoPost)
 import Orchestrator.Topics.Selector (ingestDiscoveredContent, pendingContent)
 import System.Envy (FromEnv (..), decodeEnv, env, envMaybe)
@@ -206,7 +206,8 @@ mkGhConfig cfg manager =
       ghBranch = cfgGhBranch cfg,
       ghPostsPath = cfgGhPostsPath cfg,
       ghWorkflowId = cfgGhWorkflowId cfg,
-      ghManager = manager
+      ghManager = manager,
+      ghApiBase = defaultApiBase
     }
 
 -- ---------------------------------------------------------------------------

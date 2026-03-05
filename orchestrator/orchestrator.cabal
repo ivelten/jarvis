@@ -108,6 +108,7 @@ test-suite orchestrator-test
     Orchestrator.Database.MigrationSpec
     Orchestrator.Database.ModelsSpec
     Orchestrator.Discord.BotSpec
+    Orchestrator.GitHub.ClientSpec
     Orchestrator.Posts.GeneratorSpec
     Orchestrator.Topics.SelectorSpec
     Spec
@@ -118,11 +119,14 @@ test-suite orchestrator-test
 
   build-depends:
     QuickCheck >=2.14,
+    base64-bytestring >=1.2,
     containers >=0.6,
     discord-haskell >=1.16,
     hspec >=2.10,
     hspec-discover >=2.10,
+    http-client >=0.7,
     monad-logger >=0.3,
+    network >=3.1,
     orchestrator,
     persistent >=2.14,
     persistent-postgresql >=2.13,
