@@ -249,6 +249,15 @@ spec = do
       chunkText 20 "```haskell\nfoo\nbar\nbaz\n```"
         `shouldBe` ["```haskell\nfoo\nbar\n\n```", "```haskell\nbaz\n```"]
 
+    it "terminates when a fence opener is the only content in the window" $
+      -- Regression: the fence opener line is exactly as long as the available
+      -- chunk window (opener + newline == chunk).  The old code would prepend
+      -- the opener on each recursion without making progress, looping forever.
+      let opener = "```haskell"
+          longLine = T.replicate 3000 "a"
+          body = opener <> "\n" <> longLine <> "\n```"
+       in length (chunkText 12 body) `shouldSatisfy` (> 0)
+
   describe "callback contract" $ do
     it "rrOnThreadCreated is called with the thread key after drain" $ do
       cfg <- mkDiscordConfig "token" 1 2

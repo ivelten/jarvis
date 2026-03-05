@@ -51,8 +51,15 @@ chunkText maxLen = filter (not . T.null) . map T.strip . go
            in case currentFenceOpener chunk of
                 Nothing ->
                   chunk : go (leftover <> remaining)
-                Just opener ->
-                  (chunk <> "\n```") : go (opener <> "\n" <> leftover <> remaining)
+                Just opener
+                  -- Guard: if re-inserting the opener wouldn't shrink the
+                  -- next input (len(opener)+1 >= len(chunk)), the recursion
+                  -- would make no progress and loop forever.  Fall back to
+                  -- the plain split so we always terminate.
+                  | T.length opener + 1 >= T.length chunk ->
+                      chunk : go (leftover <> remaining)
+                  | otherwise ->
+                      (chunk <> "\n```") : go (opener <> "\n" <> leftover <> remaining)
 
     bestSplit window =
       repairMarkdownLink $
