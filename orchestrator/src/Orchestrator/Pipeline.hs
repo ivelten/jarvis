@@ -119,6 +119,7 @@ persistInitialDraft PipelineEnv {..} rcKey rc draft now =
             postDraftSuggestedTags = TagList (gdTags draft),
             postDraftStatus = DraftReviewing,
             postDraftDiscordThreadId = Nothing,
+            postDraftContentMarkdown = Just (gdBody draft),
             postDraftPublishedAt = Nothing,
             postDraftPublishedUrl = Nothing,
             postDraftCreatedAt = now,
@@ -166,11 +167,16 @@ mkReviewRequest env rcKey postDraftKey createdAt draft =
       recordRevision env postDraftKey revisedDraft
       pure (gdBody revisedDraft, gdTags revisedDraft)
 
--- | Insert an 'AiAnalysis' row for a revision step.
+-- | Insert an 'AiAnalysis' row for a revision step and update the stored body.
 recordRevision :: PipelineEnv -> Key PostDraft -> GeneratedDraft -> IO ()
 recordRevision PipelineEnv {..} postDraftKey draft = do
   revisedAt <- getCurrentTime
-  runDb pipeDbPool $
+  runDb pipeDbPool $ do
+    update
+      postDraftKey
+      [ PostDraftContentMarkdown =. Just (gdBody draft),
+        PostDraftUpdatedAt =. revisedAt
+      ]
     insert_
       AiAnalysis
         { aiAnalysisPostDraftId = postDraftKey,
@@ -230,15 +236,22 @@ publishDraft PipelineEnv {..} rcKey postDraftKey createdAt finalBody tags = do
       [ PostDraftStatus =. DraftApproved,
         PostDraftUpdatedAt =. approvedAt
       ]
-  result <-
-    ( try $ do
-        commitPost pipeGhCfg finalFilename mdContent
-        putStrLn "[Drafts] Triggering deploy workflow..."
-        triggerDeploy pipeGhCfg
-    ) ::
+  commitResult <-
+    (try (commitPost pipeGhCfg finalTitle finalFilename mdContent)) ::
       IO (Either SomeException ())
-  case result of
+  case commitResult of
+    Left ex -> do
+      -- Commit failed: roll back both the draft and the raw-content status so
+      -- the next scheduled run picks this item up and generates a fresh draft.
+      failedAt <- getCurrentTime
+      runDb pipeDbPool $ do
+        update postDraftKey [PostDraftStatus =. DraftReviewing, PostDraftUpdatedAt =. failedAt]
+        update rcKey [RawContentStatus =. ContentNew, RawContentUpdatedAt =. failedAt]
+      putStrLn $ "[Drafts] Commit failed; reset to pending. Error: " <> displayException ex
+      ioError (userError (displayException ex))
     Right () -> do
+      -- Commit succeeded: persist published state immediately so a deploy
+      -- failure below cannot leave the draft stuck in DraftApproved.
       publishedAt' <- getCurrentTime
       runDb pipeDbPool $
         update
@@ -246,24 +259,26 @@ publishDraft PipelineEnv {..} rcKey postDraftKey createdAt finalBody tags = do
           [ PostDraftTitle =. finalTitle,
             PostDraftGitBranch =. "draft/" <> finalSlug,
             PostDraftStatus =. DraftPublished,
+            PostDraftContentMarkdown =. Just mdContent,
             PostDraftPublishedAt =. Just publishedAt',
             PostDraftUpdatedAt =. publishedAt'
           ]
-      putStrLn "[Drafts] Deployed."
-    Left ex -> do
-      failedAt <- getCurrentTime
-      runDb pipeDbPool $
-        update
-          rcKey
-          [ RawContentStatus =. ContentNew,
-            RawContentUpdatedAt =. failedAt
-          ]
-      putStrLn $ "[Drafts] Commit/deploy failed; reset to pending. Error: " <> displayException ex
-      ioError (userError (displayException ex))
+      putStrLn "[Drafts] Post committed to GitHub. Triggering deploy workflow..."
+      deployResult <-
+        (try (triggerDeploy pipeGhCfg)) ::
+          IO (Either SomeException ())
+      case deployResult of
+        Left ex ->
+          -- The post is already committed; a deploy failure is non-fatal.
+          -- The next push to the repo will trigger the deploy workflow anyway.
+          putStrLn $ "[Drafts] Warning: deploy dispatch failed (post is committed): " <> displayException ex
+        Right () ->
+          putStrLn "[Drafts] Deploy triggered."
 
 -- | Mark the raw content and post draft as rejected.
 rejectDraft :: PipelineEnv -> Key RawContent -> Key PostDraft -> Text -> IO ()
 rejectDraft PipelineEnv {..} rcKey postDraftKey reason = do
+  putStrLn $ "[Drafts] Draft rejected. Reason: " <> T.unpack reason
   rejectedAt <- getCurrentTime
   runDb pipeDbPool $ do
     update

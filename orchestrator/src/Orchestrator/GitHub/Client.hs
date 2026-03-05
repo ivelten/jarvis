@@ -48,7 +48,9 @@ data GitHubConfig = GitHubConfig
 data CommitRequest = CommitRequest
   { -- | Branch to commit to.
     crBranch :: !Text,
-    -- | Filename (used in the commit message and URL).
+    -- | Post title, used in the commit message.
+    crTitle :: !Text,
+    -- | Filename (used in the URL path).
     crFilename :: !Text,
     -- | Markdown content; will be base64-encoded before sending.
     crContent :: !Text,
@@ -118,7 +120,7 @@ buildCommitBody :: CommitRequest -> Value
 buildCommitBody CommitRequest {..} =
   let encodedContent = TE.decodeUtf8 . B64.encode . TE.encodeUtf8 $ crContent
       baseFields =
-        [ "message" .= ("feat(posts): publish " <> crFilename),
+        [ "message" .= ("\x1F4DD Post: " <> crTitle),
           "content" .= encodedContent,
           "branch" .= crBranch
         ]
@@ -139,17 +141,20 @@ buildDeployBody branch = object ["ref" .= branch]
 -- request is treated as an update rather than a conflicting create.
 commitPost ::
   GitHubConfig ->
+  -- | Post title, used verbatim in the commit message.
+  Text ->
   -- | Post filename, e.g. @"my-post.md"@.
   Text ->
   -- | Markdown content (with Hugo front-matter).
   Text ->
   IO ()
-commitPost cfg filename content = do
+commitPost cfg title filename content = do
   mSha <- getFileSha cfg filename
   let body =
         buildCommitBody
           CommitRequest
             { crBranch = ghBranch cfg,
+              crTitle = title,
               crFilename = filename,
               crContent = content,
               crSha = mSha
@@ -175,8 +180,8 @@ commitPost cfg filename content = do
 
 -- | Trigger a GitHub Actions workflow dispatch to rebuild the Hugo site.
 --
--- This is best-effort: a non-fatal warning is printed on failure so that a
--- workflow hiccup does not roll back a successfully committed post.
+-- Raises an 'IOError' on failure. Callers are encouraged to catch this and
+-- treat it as a warning when the post has already been successfully committed.
 triggerDeploy :: GitHubConfig -> IO ()
 triggerDeploy cfg@GitHubConfig {..} = do
   let url =

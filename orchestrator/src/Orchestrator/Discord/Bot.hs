@@ -212,9 +212,7 @@ processReview hdl cfg ReviewRequest {..} = do
             startThreadForumMediaMessage = forumMsg,
             startThreadForumMediaAppliedTags = Nothing
           }
-  putStrLn "[Discord] Creating forum thread..."
   result <- runReaderT (restCall (StartThreadForumMedia chanId forumOpts)) hdl
-  putStrLn $ "[Discord] Forum thread REST call returned: " <> case result of Left _ -> "Left (error)"; Right _ -> "Right (success)"
   case result of
     Left err ->
       putStrLn $ "[Discord] failed to create forum thread: " <> show err
@@ -223,10 +221,9 @@ processReview hdl cfg ReviewRequest {..} = do
           key = showId tid
           -- In a forum channel the starter message ID equals the thread ID.
           starterMsgId = DiscordId (unId tid) :: MessageId
-      putStrLn $ "[Discord] Thread created, tid=" <> T.unpack key <> ". Calling postChunked..."
+      putStrLn $ "[Discord] Thread created (tid=" <> T.unpack key <> "), posting draft body..."
       -- Post full draft body as the first thread reply (split across messages if needed).
       postChunked hdl tid (emojiDraft <> " **Draft:**\n\n") rrBody
-      putStrLn "[Discord] postChunked done. Adding delay before reactions..."
       -- Wait before adding reactions so they don't compete for the rate-limit
       -- bucket with the last draft chunk.
       threadDelay 2_000_000
@@ -252,7 +249,6 @@ processReview hdl cfg ReviewRequest {..} = do
       -- Add reaction affordances to the forum thread starter message.
       -- The starter message lives inside the thread channel (tid), not the
       -- parent forum channel (chanId).
-      putStrLn "[Discord] Adding reactions..."
       restCallIO hdl (CreateReaction (tid, starterMsgId) emojiApprove)
       restCallIO hdl (CreateReaction (tid, starterMsgId) emojiReject)
       putStrLn "[Discord] Review setup complete."

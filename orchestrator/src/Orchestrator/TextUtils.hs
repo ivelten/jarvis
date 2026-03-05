@@ -38,7 +38,9 @@ truncateText maxLen t
 --
 -- Code fences are kept coherent: when a split falls inside an open fence the
 -- current chunk is closed with @```@ and the next chunk reopens it with the
--- same fence header.
+-- same fence header.  Splitting right at the fence opener line (with no code
+-- content in the chunk) is detected and recovered by forcing a split within the
+-- code content that follows, so a bare opener is never emitted as a message.
 chunkText :: Int -> Text -> [Text]
 chunkText maxLen = filter (not . T.null) . map T.strip . go
   where
@@ -51,15 +53,34 @@ chunkText maxLen = filter (not . T.null) . map T.strip . go
            in case currentFenceOpener chunk of
                 Nothing ->
                   chunk : go (leftover <> remaining)
-                Just opener
-                  -- Guard: if re-inserting the opener wouldn't shrink the
-                  -- next input (len(opener)+1 >= len(chunk)), the recursion
-                  -- would make no progress and loop forever.  Fall back to
-                  -- the plain split so we always terminate.
-                  | T.length opener + 1 >= T.length chunk ->
-                      chunk : go (leftover <> remaining)
-                  | otherwise ->
-                      (chunk <> "\n```") : go (opener <> "\n" <> leftover <> remaining)
+                Just opener ->
+                  let opLen = T.length opener + 1 -- opener + '\n'
+                   in if opLen >= T.length chunk
+                        then
+                          let (altChunk, altLeft) =
+                                bestSplitWithMinPrefix opLen (chunk <> leftover)
+                           in case currentFenceOpener altChunk of
+                                Nothing ->
+                                  altChunk : go (altLeft <> remaining)
+                                Just ro ->
+                                  if T.length ro + 1 >= T.length altChunk
+                                    then altChunk : go (altLeft <> remaining)
+                                    else (altChunk <> "\n```") : go (ro <> "\n" <> altLeft <> remaining)
+                        else
+                          (chunk <> "\n```") : go (opener <> "\n" <> leftover <> remaining)
+
+    -- \| Like 'bestSplit' but treats the first @minPfx@ characters of the
+    -- window as a fixed prefix — the split is only searched for in the
+    -- remainder, preventing the opener line from being chosen as the split
+    -- point.
+    bestSplitWithMinPrefix minPfx window =
+      let prefix = T.take minPfx window
+          rest = T.drop minPfx window
+       in if T.null rest
+            then (window, "")
+            else
+              let (c, l) = bestSplit rest
+               in (prefix <> c, l)
 
     bestSplit window =
       repairMarkdownLink $

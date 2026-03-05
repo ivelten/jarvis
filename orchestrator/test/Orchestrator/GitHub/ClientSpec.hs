@@ -63,28 +63,28 @@ spec = do
   describe "buildCommitBody" $ do
     it "base64-encodes the file content" $ do
       let expected = TE.decodeUtf8 (B64.encode (TE.encodeUtf8 "Hello, World!"))
-          body = buildCommitBody (req "main" "post.md" "Hello, World!" Nothing)
+          body = buildCommitBody (req "main" "My Post" "post.md" "Hello, World!" Nothing)
       getField "content" body `shouldBe` Just expected
 
-    it "sets the commit message from the filename" $ do
-      let body = buildCommitBody (req "main" "my-post.md" "body" Nothing)
-      getField "message" body `shouldBe` Just ("feat(posts): publish my-post.md" :: Text)
+    it "sets the commit message from the post title" $ do
+      let body = buildCommitBody (req "main" "Beyond OOP" "my-post.md" "body" Nothing)
+      getField "message" body `shouldBe` Just ("\x1F4DD Post: Beyond OOP" :: Text)
 
     it "sets the branch from the first argument" $ do
-      let body = buildCommitBody (req "gh-pages" "p.md" "body" Nothing)
+      let body = buildCommitBody (req "gh-pages" "Title" "p.md" "body" Nothing)
       getField "branch" body `shouldBe` Just ("gh-pages" :: Text)
 
     it "omits 'sha' when Nothing is passed (new file create)" $ do
-      let body = buildCommitBody (req "main" "p.md" "body" Nothing)
+      let body = buildCommitBody (req "main" "Title" "p.md" "body" Nothing)
       (getField "sha" body :: Maybe Text) `shouldBe` Nothing
 
     it "includes 'sha' when Just is passed (file update)" $ do
-      let body = buildCommitBody (req "main" "p.md" "body" (Just "deadbeef123"))
+      let body = buildCommitBody (req "main" "Title" "p.md" "body" (Just "deadbeef123"))
       getField "sha" body `shouldBe` Just ("deadbeef123" :: Text)
 
     it "round-trips multibyte Unicode content through base64" $ do
       let content = "Haskell är kul \x1F389"
-          body = buildCommitBody (req "main" "p.md" content Nothing)
+          body = buildCommitBody (req "main" "Title" "p.md" content Nothing)
           encoded = getField "content" body :: Maybe Text
           decoded = fmap (TE.decodeUtf8 . B64.decodeLenient . TE.encodeUtf8) encoded
       decoded `shouldBe` Just content
@@ -100,17 +100,17 @@ spec = do
     it "creates a new file when the server returns 404 then 201" $
       withMockServer [sha404, created201] $ \port -> do
         let cfg = stubConfig mgr (localhost port)
-        commitPost cfg "new-post.md" "some content"
+        commitPost cfg "New Post" "new-post.md" "some content"
 
     it "updates an existing file when the server returns 200 (with SHA) then 200" $
       withMockServer [shaFound "abc123", updated200] $ \port -> do
         let cfg = stubConfig mgr (localhost port)
-        commitPost cfg "existing-post.md" "updated content"
+        commitPost cfg "Existing Post" "existing-post.md" "updated content"
 
     it "throws an IOError that mentions the status code on a non-201 commit response" $ do
       result <- try $ withMockServer [sha404, errUnprocessable] $ \port -> do
         let cfg = stubConfig mgr (localhost port)
-        commitPost cfg "bad.md" "content"
+        commitPost cfg "Bad Post" "bad.md" "content"
       case result of
         Left (e :: SomeException) -> show e `shouldContain` "422"
         Right _ -> expectationFailure "expected an exception on 422 commit"
@@ -151,10 +151,11 @@ localhost :: Int -> Text
 localhost port = "http://localhost:" <> T.pack (show port)
 
 -- | Shorthand for constructing a 'CommitRequest' in tests.
-req :: Text -> Text -> Text -> Maybe Text -> CommitRequest
-req branch filename content mSha =
+req :: Text -> Text -> Text -> Text -> Maybe Text -> CommitRequest
+req branch title filename content mSha =
   CommitRequest
     { crBranch = branch,
+      crTitle = title,
       crFilename = filename,
       crContent = content,
       crSha = mSha

@@ -249,14 +249,28 @@ spec = do
       chunkText 20 "```haskell\nfoo\nbar\nbaz\n```"
         `shouldBe` ["```haskell\nfoo\nbar\n\n```", "```haskell\nbaz\n```"]
 
-    it "terminates when a fence opener is the only content in the window" $
-      -- Regression: the fence opener line is exactly as long as the available
-      -- chunk window (opener + newline == chunk).  The old code would prepend
-      -- the opener on each recursion without making progress, looping forever.
+    it "terminates and never emits a bare opener when a long code line forces the split" $
+      -- Regression: when the only split point in a window is the newline right
+      -- after the fence opener (because the code line is longer than maxLen),
+      -- the old code either looped infinitely or emitted a bare opener message.
+      -- The fix forces the split to occur within the code content after the
+      -- opener, so every emitted chunk contains real code.
       let opener = "```haskell"
           longLine = T.replicate 3000 "a"
           body = opener <> "\n" <> longLine <> "\n```"
-       in length (chunkText 12 body) `shouldSatisfy` (> 0)
+          chunks = chunkText 12 body
+       in do
+            length chunks `shouldSatisfy` (> 0)
+            all (\c -> c `notElem` ["```haskell", "```python", "```"]) chunks
+              `shouldBe` True
+
+    it "never emits a bare fence opener when a long word-free code line forces a hard cut" $
+      -- A code line with no spaces forces a hard cut.  The opener must still be
+      -- paired with code content in every emitted chunk.
+      let body = "```haskell\n" <> T.replicate 200 "x" <> "\n```"
+          chunks = chunkText 50 body
+       in all (\c -> c `notElem` ["```haskell", "```python", "```"]) chunks
+            `shouldBe` True
 
   describe "callback contract" $ do
     it "rrOnThreadCreated is called with the thread key after drain" $ do

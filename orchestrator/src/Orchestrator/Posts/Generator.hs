@@ -21,7 +21,8 @@ buildHugoFrontMatter title slug date tags =
       "+++"
     ]
   where
-    quote t = "\"" <> t <> "\""
+    -- Escape backslashes first, then double-quotes, to produce valid TOML strings.
+    quote t = "\"" <> T.replace "\\" "\\\\" (T.replace "\"" "\\\"" t) <> "\""
 
 -- | Combine front-matter and body into a full Hugo Markdown file.
 renderHugoPost :: Text -> Text -> UTCTime -> [Text] -> Text -> Text

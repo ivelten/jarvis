@@ -52,7 +52,6 @@ RawContent
   deriving Show Eq
 
 -- | A blog post draft generated from one or more RawContent items.
--- The actual Markdown body lives in the Git branch; only metadata is stored here.
 PostDraft
   title            Text
   gitBranch        Text
@@ -60,6 +59,7 @@ PostDraft
   suggestedTags    TagList
   status           DraftStatus
   discordThreadId  Text Maybe
+  contentMarkdown  Text Maybe
   publishedAt      UTCTime Maybe
   publishedUrl     Text Maybe
   createdAt        UTCTime
