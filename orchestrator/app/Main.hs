@@ -119,7 +119,7 @@ runDraftGeneration aiCfg ghCfg dcCfg pool = do
           slug = toSlug title
           filename = slug <> ".md"
           revise currentBody feedback =
-            gdBody <$> reviseDraft aiCfg title currentBody feedback
+            (\d -> (gdBody d, gdTags d)) <$> reviseDraft aiCfg title currentBody feedback
       -- Mark as drafted immediately so restarts don't re-pick this item.
       runDb pool $
         update
@@ -133,18 +133,34 @@ runDraftGeneration aiCfg ghCfg dcCfg pool = do
         ReviewRequest
           { rrTitle = title,
             rrBody = gdBody draft,
+            rrTags = gdTags draft,
             rrRevise = revise,
-            rrApprove = onApprove filename title slug now (gdTags draft),
+            rrApprove = onApprove rcKey filename title slug now,
             rrReject = onReject rcKey
           }
 
-    onApprove filename title slug now tags finalBody = do
+    onApprove rcKey filename title slug now finalBody tags = do
       let mdContent = renderHugoPost title slug now tags finalBody
       putStrLn $ "[Drafts] Approved! Committing " <> T.unpack filename <> " to GitHub..."
-      commitPost ghCfg filename mdContent
-      putStrLn "[Drafts] Triggering deploy workflow..."
-      triggerDeploy ghCfg
-      putStrLn "[Drafts] Deployed."
+      result <-
+        ( try $ do
+            commitPost ghCfg filename mdContent
+            putStrLn "[Drafts] Triggering deploy workflow..."
+            triggerDeploy ghCfg
+        ) ::
+          IO (Either SomeException ())
+      case result of
+        Right () -> putStrLn "[Drafts] Deployed."
+        Left ex -> do
+          failedAt <- getCurrentTime
+          runDb pool $
+            update
+              rcKey
+              [ RawContentStatus =. ContentNew,
+                RawContentUpdatedAt =. failedAt
+              ]
+          putStrLn $ "[Drafts] Commit/deploy failed; reset to pending. Error: " <> show ex
+          ioError (userError (show ex))
 
     onReject rcKey reason = do
       rejectedAt <- getCurrentTime

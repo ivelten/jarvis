@@ -38,16 +38,18 @@ data PendingReview = PendingReview
     prTitle :: !Text,
     -- | Current draft body; updated atomically after each AI revision.
     prCurrentBody :: !(TVar Text),
+    -- | Current tags; updated atomically alongside 'prCurrentBody' after each revision.
+    prCurrentTags :: !(TVar [Text]),
     -- | Lookup key: forum thread Snowflake as text.  Because in a forum
     -- channel the thread ID equals the starter message ID, one key serves
     -- both reaction events and thread-message events.
     prKey :: !Text,
     -- | Thread 'ChannelId' for posting revision replies.
     prThreadId :: !ChannelId,
-    -- | @(currentBody, feedback) -> revisedBody@.  Called on every thread message.
-    prRevise :: Text -> Text -> IO Text,
-    -- | Called with the final body when ✅ is received or an approval phrase is typed.
-    prApprove :: Text -> IO (),
+    -- | @(currentBody, feedback) -> (revisedBody, revisedTags)@.  Called on every thread message.
+    prRevise :: Text -> Text -> IO (Text, [Text]),
+    -- | Called with the final body and tags when ✅ is received or an approval phrase is typed.
+    prApprove :: Text -> [Text] -> IO (),
     -- | Called with the rejection reason when ❌ is received.
     prReject :: Text -> IO ()
   }
@@ -59,12 +61,14 @@ data ReviewRequest = ReviewRequest
     rrTitle :: !Text,
     -- | Full Markdown draft body.
     rrBody :: !Text,
-    -- | @(currentBody, feedback) -> revisedBody@.  Called for each reviewer
+    -- | Initial tags from the draft; kept in sync with the body after revisions.
+    rrTags :: ![Text],
+    -- | @(currentBody, feedback) -> (revisedBody, revisedTags)@.  Called for each reviewer
     -- message in the thread that is not an approval.
-    rrRevise :: Text -> Text -> IO Text,
-    -- | Called with the final body when the reviewer approves (✅ reaction or
+    rrRevise :: Text -> Text -> IO (Text, [Text]),
+    -- | Called with the final body and tags when the reviewer approves (✅ reaction or
     -- approval phrase in the thread).
-    rrApprove :: Text -> IO (),
+    rrApprove :: Text -> [Text] -> IO (),
     -- | Called with the rejection reason (e.g. the ❌ emoji) when rejected.
     rrReject :: Text -> IO ()
   }
@@ -205,10 +209,12 @@ drainQueue hdl cfg = forever $ do
       threadDelay 2_000_000
       -- Build and register the PendingReview.
       bodyVar <- newTVarIO rrBody
+      tagsVar <- newTVarIO rrTags
       let pr =
             PendingReview
               { prTitle = rrTitle,
                 prCurrentBody = bodyVar,
+                prCurrentTags = tagsVar,
                 prKey = key,
                 prThreadId = tid,
                 prRevise = rrRevise,
@@ -243,7 +249,10 @@ eventHandler cfg (MessageReactionAdd ri) = do
       Just pr ->
         liftIO $
           if emoji == emojiApprove
-            then readTVarIO (prCurrentBody pr) >>= prApprove pr
+            then do
+              body <- readTVarIO (prCurrentBody pr)
+              tags <- readTVarIO (prCurrentTags pr)
+              prApprove pr body tags
             else prReject pr emoji
 -- \| Thread-message-based revision / approval.
 eventHandler cfg (MessageCreate m) = do
@@ -258,7 +267,9 @@ eventHandler cfg (MessageCreate m) = do
         if isApprovalMessage (messageContent m)
           then liftIO $ do
             atomically $ deregister cfg key
-            readTVarIO (prCurrentBody pr) >>= prApprove pr
+            body <- readTVarIO (prCurrentBody pr)
+            tags <- readTVarIO (prCurrentTags pr)
+            prApprove pr body tags
           else handleRevision pr (messageContent m)
 eventHandler _ _ = pure ()
 
@@ -284,7 +295,7 @@ handleRevision :: PendingReview -> Text -> DiscordHandler ()
 handleRevision pr feedback = do
   result <- liftIO $ do
     currentBody <- readTVarIO (prCurrentBody pr)
-    try (prRevise pr currentBody feedback) :: IO (Either SomeException Text)
+    try (prRevise pr currentBody feedback) :: IO (Either SomeException (Text, [Text]))
   case result of
     Left ex ->
       void $
@@ -292,8 +303,10 @@ handleRevision pr feedback = do
           CreateMessage
             (prThreadId pr)
             (emojiWarning <> " Could not revise draft: " <> T.pack (show ex))
-    Right newBody -> do
-      liftIO $ atomically $ writeTVar (prCurrentBody pr) newBody
+    Right (newBody, newTags) -> do
+      liftIO $ atomically $ do
+        writeTVar (prCurrentBody pr) newBody
+        writeTVar (prCurrentTags pr) newTags
       hdl <- ask
       liftIO $ postChunked hdl (prThreadId pr) (emojiRevise <> " **Revised draft:**\n\n") newBody
 

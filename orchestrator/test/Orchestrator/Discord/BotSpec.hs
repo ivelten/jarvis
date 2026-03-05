@@ -31,10 +31,12 @@ simulateDrain :: DiscordConfig -> Text -> IO PendingReview
 simulateDrain cfg key = do
   req <- takeMVar (dcSendQueue cfg)
   bodyVar <- newTVarIO (rrBody req)
+  tagsVar <- newTVarIO (rrTags req)
   let pr =
         PendingReview
           { prTitle = rrTitle req,
             prCurrentBody = bodyVar,
+            prCurrentTags = tagsVar,
             prKey = key,
             prThreadId = testThreadId,
             prRevise = rrRevise req,
@@ -69,11 +71,15 @@ simulateThreadMessage cfg key content = do
       if isApprovalMessage content
         then do
           atomically $ modifyTVar' (dcReviewMap cfg) (Map.delete key)
-          readTVarIO (prCurrentBody pr) >>= prApprove pr
+          body <- readTVarIO (prCurrentBody pr)
+          tags <- readTVarIO (prCurrentTags pr)
+          prApprove pr body tags
         else do
           currentBody <- readTVarIO (prCurrentBody pr)
-          newBody <- prRevise pr currentBody content
-          atomically $ writeTVar (prCurrentBody pr) newBody
+          (newBody, newTags) <- prRevise pr currentBody content
+          atomically $ do
+            writeTVar (prCurrentBody pr) newBody
+            writeTVar (prCurrentTags pr) newTags
 
 -- ---------------------------------------------------------------------------
 
@@ -109,7 +115,7 @@ spec = do
   describe "registerForReview" $ do
     it "queues the request with the correct title and body" $ do
       cfg <- mkDiscordConfig "token" 1 2
-      registerForReview cfg ReviewRequest {rrTitle = "My Title", rrBody = "My Body", rrRevise = \_ _ -> pure "", rrApprove = \_ -> pure (), rrReject = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "My Title", rrBody = "My Body", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \_ _ -> pure (), rrReject = \_ -> pure ()}
       req <- takeMVar (dcSendQueue cfg)
       rrTitle req `shouldBe` "My Title"
       rrBody req `shouldBe` "My Body"
@@ -117,16 +123,19 @@ spec = do
     it "fires the approve callback with the current body when \x2705 is received" $ do
       cfg <- mkDiscordConfig "token" 1 2
       result <- newIORef ("" :: Text)
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "original-body", rrRevise = \_ _ -> pure "", rrApprove = writeIORef result, rrReject = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "original-body", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \body _tags -> writeIORef result body, rrReject = \_ -> pure ()}
       pr <- simulateDrain cfg "key-1"
       Just pr' <- simulateReaction cfg "key-1"
-      readTVarIO (prCurrentBody pr') >>= prApprove pr'
+      do
+        body <- readTVarIO (prCurrentBody pr')
+        tags <- readTVarIO (prCurrentTags pr')
+        prApprove pr' body tags
       readIORef result `shouldReturn` "original-body"
 
     it "fires the reject callback with the emoji when \x274c is received" $ do
       cfg <- mkDiscordConfig "token" 1 2
       rejectRef <- newIORef ("" :: Text)
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrRevise = \_ _ -> pure "", rrApprove = \_ -> pure (), rrReject = writeIORef rejectRef}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \_ _ -> pure (), rrReject = writeIORef rejectRef}
       _ <- simulateDrain cfg "key-2"
       Just pr <- simulateReaction cfg "key-2"
       prReject pr "\x274c"
@@ -135,13 +144,16 @@ spec = do
     it "removes both map entries before firing the approve callback" $ do
       cfg <- mkDiscordConfig "token" 1 2
       mapSizeRef <- newIORef (-1 :: Int)
-      let onApprove _ = do
+      let onApprove _ _ = do
             rm <- readTVarIO (dcReviewMap cfg)
             writeIORef mapSizeRef (Map.size rm)
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrRevise = \_ _ -> pure "", rrApprove = onApprove, rrReject = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = onApprove, rrReject = \_ -> pure ()}
       _ <- simulateDrain cfg "key-3"
       Just pr <- simulateReaction cfg "key-3"
-      readTVarIO (prCurrentBody pr) >>= prApprove pr
+      do
+        body <- readTVarIO (prCurrentBody pr)
+        tags <- readTVarIO (prCurrentTags pr)
+        prApprove pr body tags
       readIORef mapSizeRef `shouldReturn` 0
 
     it "handles two concurrent reviews independently" $ do
@@ -150,15 +162,18 @@ spec = do
       resultB <- newIORef ("" :: Text)
       registerForReview
         cfg
-        ReviewRequest {rrTitle = "A", rrBody = "bodyA", rrRevise = \_ _ -> pure "", rrApprove = writeIORef resultA, rrReject = \_ -> writeIORef resultA "rejected"}
+        ReviewRequest {rrTitle = "A", rrBody = "bodyA", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \body _tags -> writeIORef resultA body, rrReject = \_ -> writeIORef resultA "rejected"}
       prA <- simulateDrain cfg "key-A"
       registerForReview
         cfg
-        ReviewRequest {rrTitle = "B", rrBody = "bodyB", rrRevise = \_ _ -> pure "", rrApprove = writeIORef resultB, rrReject = writeIORef resultB}
+        ReviewRequest {rrTitle = "B", rrBody = "bodyB", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \body _tags -> writeIORef resultB body, rrReject = writeIORef resultB}
       prB <- simulateDrain cfg "key-B"
       Just _ <- simulateReaction cfg "key-A"
       Just _ <- simulateReaction cfg "key-B"
-      readTVarIO (prCurrentBody prA) >>= prApprove prA
+      do
+        body <- readTVarIO (prCurrentBody prA)
+        tags <- readTVarIO (prCurrentTags prA)
+        prApprove prA body tags
       prReject prB "\x274c"
       readIORef resultA `shouldReturn` "bodyA"
       readIORef resultB `shouldReturn` "\x274c"
@@ -167,15 +182,15 @@ spec = do
     it "calls the revise function with current body and feedback" $ do
       cfg <- mkDiscordConfig "token" 1 2
       revCount <- newIORef (0 :: Int)
-      let revise _body _feedback = modifyIORef revCount (+ 1) >> pure "revised"
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrRevise = revise, rrApprove = \_ -> pure (), rrReject = \_ -> pure ()}
+      let revise _body _feedback = modifyIORef revCount (+ 1) >> pure ("revised", [])
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrTags = [], rrRevise = revise, rrApprove = \_ _ -> pure (), rrReject = \_ -> pure ()}
       _ <- simulateDrain cfg "key-r1"
       simulateThreadMessage cfg "key-r1" "please add more examples"
       readIORef revCount `shouldReturn` 1
 
     it "updates the current body after a revision" $ do
       cfg <- mkDiscordConfig "token" 1 2
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrRevise = \_ _ -> pure "revised", rrApprove = \_ -> pure (), rrReject = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrTags = [], rrRevise = \_ _ -> pure ("revised", []), rrApprove = \_ _ -> pure (), rrReject = \_ -> pure ()}
       pr <- simulateDrain cfg "key-r2"
       simulateThreadMessage cfg "key-r2" "make it shorter"
       readTVarIO (prCurrentBody pr) `shouldReturn` "revised"
@@ -184,7 +199,7 @@ spec = do
       cfg <- mkDiscordConfig "token" 1 2
       result <- newIORef ("" :: Text)
       -- First revision changes body to "revised"; second approval should fire with "revised".
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrRevise = \_ _ -> pure "revised", rrApprove = writeIORef result, rrReject = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrTags = [], rrRevise = \_ _ -> pure ("revised", []), rrApprove = \body _tags -> writeIORef result body, rrReject = \_ -> pure ()}
       _ <- simulateDrain cfg "key-ap"
       simulateThreadMessage cfg "key-ap" "add examples"
       simulateThreadMessage cfg "key-ap" "publish"
@@ -192,7 +207,7 @@ spec = do
 
     it "removes both maps when approved via thread message" $ do
       cfg <- mkDiscordConfig "token" 1 2
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrRevise = \_ _ -> pure "", rrApprove = \_ -> pure (), rrReject = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \_ _ -> pure (), rrReject = \_ -> pure ()}
       _ <- simulateDrain cfg "key-cl"
       simulateThreadMessage cfg "key-cl" "looks good"
       rm <- readTVarIO (dcReviewMap cfg)
