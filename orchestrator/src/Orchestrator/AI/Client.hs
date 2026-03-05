@@ -34,7 +34,7 @@ import Network.HTTP.Client
 data AiConfig = AiConfig
   { -- | Google AI API key (from environment, see https://aistudio.google.com/apikey).
     aiApiKey :: !Text,
-    -- | Model identifier, e.g. @"gemini-2.0-flash"@ or @"gemini-2.5-pro"@.
+    -- | Model identifier, e.g. @"gemini-2.5-flash"@ or @"gemini-2.5-pro"@.
     aiModel :: !Text,
     aiManager :: !Manager
   }

@@ -45,7 +45,7 @@ data Config = Config
     cfgDbUrl :: !String,
     -- | Google Gemini API key.
     cfgGeminiKey :: !Text,
-    -- | Gemini model name (default: @gemini-2.0-flash@).
+    -- | Gemini model name (default: @gemini-2.5-flash@).
     cfgGeminiModel :: !Text,
     -- | GitHub Personal Access Token with @contents:write@ and @actions:write@.
     cfgGhToken :: !Text,
@@ -76,7 +76,7 @@ instance FromEnv Config where
     Config
       <$> env "DATABASE_URL"
       <*> env "GEMINI_API_KEY"
-      <*> (fromMaybe "gemini-2.0-flash" <$> envMaybe "GEMINI_MODEL")
+      <*> (fromMaybe "gemini-2.5-flash" <$> envMaybe "GEMINI_MODEL")
       <*> env "GITHUB_TOKEN"
       <*> env "GITHUB_REPO_OWNER"
       <*> env "GITHUB_REPO_NAME"
