@@ -85,6 +85,37 @@ spec = do
       let json = "{\"title\":\"T\"}"
       (decode json :: Maybe DiscoveredContent) `shouldBe` Nothing
 
+  describe "parseTagsLine" $ do
+    it "parses a TAGS line and returns trimmed tags" $ do
+      let input = "TAGS: haskell, functional-programming, dotnet\n# Title\nBody."
+          (tags, body) = parseTagsLine input
+      tags `shouldBe` ["haskell", "functional-programming", "dotnet"]
+      T.isPrefixOf "# Title" body `shouldBe` True
+
+    it "strips leading/trailing whitespace from each tag" $ do
+      let (tags, _) = parseTagsLine "TAGS:  foo ,  bar baz  \n# T\n"
+      tags `shouldBe` ["foo", "bar baz"]
+
+    it "returns empty tags and the full text when no TAGS line is present" $ do
+      let input = "# Title\nBody."
+          (tags, body) = parseTagsLine input
+      tags `shouldBe` []
+      body `shouldBe` input
+
+    it "returns empty tags for empty input" $ do
+      let (tags, body) = parseTagsLine ""
+      tags `shouldBe` []
+      body `shouldBe` ""
+
+    it "ignores a TAGS line that is not the first line" $ do
+      let input = "# Title\nTAGS: haskell\nBody."
+          (tags, _) = parseTagsLine input
+      tags `shouldBe` []
+
+    it "excludes empty segments from comma-split" $ do
+      let (tags, _) = parseTagsLine "TAGS: haskell,,dotnet\n# T\n"
+      tags `shouldBe` ["haskell", "dotnet"]
+
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------

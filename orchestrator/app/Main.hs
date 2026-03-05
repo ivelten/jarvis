@@ -134,12 +134,12 @@ runDraftGeneration aiCfg ghCfg dcCfg pool = do
           { rrTitle = title,
             rrBody = gdBody draft,
             rrRevise = revise,
-            rrApprove = onApprove filename title slug now,
+            rrApprove = onApprove filename title slug now (gdTags draft),
             rrReject = onReject rcKey
           }
 
-    onApprove filename title slug now finalBody = do
-      let mdContent = renderHugoPost title slug now [] finalBody
+    onApprove filename title slug now tags finalBody = do
+      let mdContent = renderHugoPost title slug now tags finalBody
       putStrLn $ "[Drafts] Approved! Committing " <> T.unpack filename <> " to GitHub..."
       commitPost ghCfg filename mdContent
       putStrLn "[Drafts] Triggering deploy workflow..."

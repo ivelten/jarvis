@@ -7,8 +7,8 @@ Reviewer feedback:
 {{FEEDBACK}}
 
 Please revise the draft to address the feedback. Preserve:
-- The Hugo front-matter block at the top (title, date, draft, tags, etc.)
+- The TAGS line at the very top (e.g. TAGS: haskell, functional-programming)
 - The overall structure and Haskell focus
 - The markdown formatting conventions
 
-Return ONLY the complete revised Markdown content, starting from the H1 title or front-matter. Do not include any explanations or preamble — just the revised post content.
+Return ONLY the complete revised Markdown content, starting from the TAGS line. Do not include any explanations or preamble — just the revised post content.

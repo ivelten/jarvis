@@ -8,6 +8,7 @@ module Orchestrator.AI.Client
     generateDraft,
     reviseDraft,
     extractText,
+    parseTagsLine,
     splitTitle,
     toSlug,
   )
@@ -70,14 +71,30 @@ data GeneratedDraft = GeneratedDraft
   { gdTitle :: !Text,
     -- | Git branch name to push the draft to, e.g. @"draft/my-post-title"@.
     gdBranch :: !Text,
-    -- | Markdown body (includes Hugo front-matter if requested).
-    gdBody :: !Text
+    -- | Markdown body (without the leading TAGS line; Hugo front-matter is
+    -- added separately by 'renderHugoPost').
+    gdBody :: !Text,
+    -- | Tags extracted from the leading @TAGS:@ line of the AI output.
+    gdTags :: ![Text]
   }
   deriving (Show, Eq, Generic)
 
-instance FromJSON GeneratedDraft
+instance FromJSON GeneratedDraft where
+  parseJSON = withObject "GeneratedDraft" $ \o ->
+    GeneratedDraft
+      <$> o .: "gdTitle"
+      <*> o .: "gdBranch"
+      <*> o .: "gdBody"
+      <*> (o .:? "gdTags" .!= [])
 
-instance ToJSON GeneratedDraft
+instance ToJSON GeneratedDraft where
+  toJSON GeneratedDraft {..} =
+    object
+      [ "gdTitle" .= gdTitle,
+        "gdBranch" .= gdBranch,
+        "gdBody" .= gdBody,
+        "gdTags" .= gdTags
+      ]
 
 -- ---------------------------------------------------------------------------
 -- Embedded prompts
@@ -230,8 +247,9 @@ discoverContent cfg = do
 generateDraft :: AiConfig -> [DiscoveredContent] -> IO GeneratedDraft
 generateDraft cfg sources = do
   mdText <- callGemini cfg requestBody'
-  let (title, _) = splitTitle mdText
-  pure GeneratedDraft {gdTitle = title, gdBranch = "draft/" <> toSlug title, gdBody = mdText}
+  let (tags, body) = parseTagsLine mdText
+      (title, _) = splitTitle body
+  pure GeneratedDraft {gdTitle = title, gdBranch = "draft/" <> toSlug title, gdBody = body, gdTags = tags}
   where
     sourcesBlock = T.unlines $ zipWith formatSource ([1 ..] :: [Int]) sources
     formatSource i dc =
@@ -256,8 +274,9 @@ generateDraft cfg sources = do
 reviseDraft :: AiConfig -> Text -> Text -> Text -> IO GeneratedDraft
 reviseDraft cfg _title currentBody feedback = do
   mdText <- callGemini cfg requestBody'
-  let (title', _) = splitTitle mdText
-  pure GeneratedDraft {gdTitle = title', gdBranch = "draft/" <> toSlug title', gdBody = mdText}
+  let (tags, body) = parseTagsLine mdText
+      (title', _) = splitTitle body
+  pure GeneratedDraft {gdTitle = title', gdBranch = "draft/" <> toSlug title', gdBody = body, gdTags = tags}
   where
     prompt =
       T.replace "{{DRAFT}}" currentBody $
@@ -271,6 +290,21 @@ reviseDraft cfg _title currentBody feedback = do
 -- ---------------------------------------------------------------------------
 -- Utilities
 -- ---------------------------------------------------------------------------
+
+-- | Parse and remove a leading @TAGS: tag1, tag2, ...@ line from AI output.
+-- Returns the list of trimmed tags (empty if no TAGS line) and the remaining
+-- body text with leading whitespace stripped.
+--
+-- The Gemini draft prompt instructs the model to write exactly this line
+-- before the H1 title so we can reliably extract structured tags without
+-- a second API call.
+parseTagsLine :: Text -> ([Text], Text)
+parseTagsLine txt = case T.lines txt of
+  (l : rest)
+    | Just raw <- T.stripPrefix "TAGS:" l ->
+        let tags = filter (not . T.null) . map T.strip . T.splitOn "," $ raw
+         in (tags, T.strip (T.unlines rest))
+  _ -> ([], txt)
 
 -- | Split the first H1 heading from the document body.
 splitTitle :: Text -> (Text, Text)

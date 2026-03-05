@@ -6,10 +6,12 @@ Write a technical blog post in Markdown based on the following sources:
 {{SOURCES}}
 
 Requirements:
-  - Begin with a single Markdown H1 line as the post title
+  - Begin with a machine-readable TAGS line listing 3–6 comma-separated, lowercase,
+    hyphenated tags relevant to the post (e.g. TAGS: haskell, functional-programming, type-system)
+  - Follow immediately with a single Markdown H1 line as the post title
   - Draw clear, concrete parallels between C#/.NET and Haskell concepts
   - Include at least one practical code example (Haskell, with a C# comparison if helpful)
-  - Length: 600–900 words
+  - Length: 600–900 words (excluding the TAGS line)
   - End with a '## Further Reading' section that links to each source
 
-Output ONLY the Markdown post.
+Output ONLY the Markdown post (TAGS line first, then the H1 title and content).
