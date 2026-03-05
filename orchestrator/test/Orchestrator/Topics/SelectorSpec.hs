@@ -69,7 +69,7 @@ spec = do
         -- Simulate a human changing the status to Drafted.
         rows <- runDb pool pendingContent
         let key = case rows of
-              (e : _) -> let RawContent {} = entityVal e in entityKey_ e
+              (e : _) -> entityKey e
               [] -> error "expected a row"
         runDb pool $ update key [RawContentStatus =. ContentDrafted]
         -- Re-ingest with the same URL — status must stay Drafted.
@@ -120,8 +120,3 @@ discovered url title =
       dcSummary = "Some summary",
       dcSubject = Nothing
     }
-
--- | Extract the key from an 'Entity' using a type-annotated helper to avoid
--- ambiguity with the 'entityKey' function from persistent.
-entityKey_ :: Entity RawContent -> RawContentId
-entityKey_ = entityKey

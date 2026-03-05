@@ -63,7 +63,8 @@ instance PersistFieldSql ContentStatus where
 -- | Lifecycle status of a blog post draft.
 --
 -- The typical progression is
--- @DraftReviewing → DraftApproved → DraftPublished@.
+-- @DraftReviewing → DraftApproved → DraftPublished@;
+-- a draft discarded by the human reviewer transitions to @DraftRejected@.
 --
 -- >>> toPersistValue DraftApproved
 -- PersistText "approved"
@@ -74,12 +75,15 @@ data DraftStatus
     DraftApproved
   | -- | Draft committed to Hugo repo and live on the blog.
     DraftPublished
+  | -- | Draft rejected by the human reviewer.
+    DraftRejected
   deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 instance PersistField DraftStatus where
   toPersistValue DraftReviewing = PersistText "reviewing"
   toPersistValue DraftApproved = PersistText "approved"
   toPersistValue DraftPublished = PersistText "published"
+  toPersistValue DraftRejected = PersistText "rejected"
   fromPersistValue pv = case pv of
     PersistText t -> parseDraftStatus t
     PersistLiteral bs -> parseDraftStatus (decodeUtf8 bs)
@@ -89,6 +93,7 @@ parseDraftStatus :: Text -> Either Text DraftStatus
 parseDraftStatus "reviewing" = Right DraftReviewing
 parseDraftStatus "approved" = Right DraftApproved
 parseDraftStatus "published" = Right DraftPublished
+parseDraftStatus "rejected" = Right DraftRejected
 parseDraftStatus t = Left $ "Unknown DraftStatus value: " <> t
 
 instance PersistFieldSql DraftStatus where

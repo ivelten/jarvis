@@ -12,7 +12,7 @@ import Database.Persist (PersistField (..), PersistValue (..))
 import Orchestrator.Database.Models
 import Test.Hspec
 import Test.Hspec.QuickCheck (prop)
-import Test.QuickCheck (elements, forAll, listOf, listOf1)
+import Test.QuickCheck (elements, forAll, listOf)
 
 spec :: Spec
 spec = do
@@ -49,6 +49,8 @@ spec = do
         `shouldBe` Right DraftApproved
       (fromPersistValue (PersistLiteral (pack "published")) :: Either Text DraftStatus)
         `shouldBe` Right DraftPublished
+      (fromPersistValue (PersistLiteral (pack "rejected")) :: Either Text DraftStatus)
+        `shouldBe` Right DraftRejected
 
     it "rejects an unknown value" $
       (fromPersistValue (PersistText "oops") :: Either Text DraftStatus)

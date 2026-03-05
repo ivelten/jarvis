@@ -7,7 +7,6 @@ module Orchestrator.Discord.Bot
     mkDiscordConfig,
     registerForReview,
     isApprovalMessage,
-    chunkText,
     startBot,
   )
 where
@@ -15,18 +14,18 @@ where
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeException, displayException, try)
 import Control.Monad (forever, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask, runReaderT)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 import Discord
 import Discord.Requests (ChannelRequest (..), StartThreadForumMediaMessage (..), StartThreadForumMediaOpts (..), StartThreadOpts (..))
 import Discord.Types
+import Orchestrator.TextUtils (chunkText, truncateText)
 
 -- ---------------------------------------------------------------------------
 -- Types
@@ -51,7 +50,11 @@ data PendingReview = PendingReview
     -- | Called with the final body and tags when ✅ is received or an approval phrase is typed.
     prApprove :: Text -> [Text] -> IO (),
     -- | Called with the rejection reason when ❌ is received.
-    prReject :: Text -> IO ()
+    prReject :: Text -> IO (),
+    -- | Called with the text of each message the human reviewer sends.
+    prOnUserMessage :: Text -> IO (),
+    -- | Called with the text of each reply posted by the bot (revised drafts).
+    prOnBotMessage :: Text -> IO ()
   }
 
 -- | All the information needed to submit a draft for Discord review.
@@ -70,7 +73,15 @@ data ReviewRequest = ReviewRequest
     -- approval phrase in the thread).
     rrApprove :: Text -> [Text] -> IO (),
     -- | Called with the rejection reason (e.g. the ❌ emoji) when rejected.
-    rrReject :: Text -> IO ()
+    rrReject :: Text -> IO (),
+    -- | Called with the text of each message the human reviewer sends in the thread
+    -- (feedback, approval phrase, or rejection emoji from a reaction).
+    rrOnUserMessage :: Text -> IO (),
+    -- | Called with the text of each reply the bot posts (i.e. a revised draft).
+    rrOnBotMessage :: Text -> IO (),
+    -- | Called with the Discord thread ID (as 'Text') once the review thread
+    -- has been created.  Useful for persisting the thread ID back to the DB.
+    rrOnThreadCreated :: Text -> IO ()
   }
 
 -- | Runtime configuration for the Discord bot.
@@ -175,7 +186,7 @@ drainQueue hdl cfg = forever $ do
       embed =
         def
           { createEmbedTitle = rrTitle,
-            createEmbedDescription = mkEmbedPreview 500 rrBody,
+            createEmbedDescription = truncateText 500 rrBody,
             createEmbedFooterText =
               "React " <> emojiApprove <> " to approve, " <> emojiReject <> " to reject, or type feedback in the thread."
           }
@@ -219,9 +230,13 @@ drainQueue hdl cfg = forever $ do
                 prThreadId = tid,
                 prRevise = rrRevise,
                 prApprove = rrApprove,
-                prReject = rrReject
+                prReject = rrReject,
+                prOnUserMessage = rrOnUserMessage,
+                prOnBotMessage = rrOnBotMessage
               }
       atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert key pr)
+      -- Notify the caller that the thread has been created.
+      rrOnThreadCreated key
       -- Add reaction affordances to the forum thread starter message.
       -- The starter message lives inside the thread channel (tid), not the
       -- parent forum channel (chanId).
@@ -250,10 +265,13 @@ eventHandler cfg (MessageReactionAdd ri) = do
         liftIO $
           if emoji == emojiApprove
             then do
+              prOnUserMessage pr emoji
               body <- readTVarIO (prCurrentBody pr)
               tags <- readTVarIO (prCurrentTags pr)
               prApprove pr body tags
-            else prReject pr emoji
+            else do
+              prOnUserMessage pr emoji
+              prReject pr emoji
 -- \| Thread-message-based revision / approval.
 eventHandler cfg (MessageCreate m) = do
   cache <- readCache
@@ -267,6 +285,7 @@ eventHandler cfg (MessageCreate m) = do
         if isApprovalMessage (messageContent m)
           then liftIO $ do
             atomically $ deregister cfg key
+            prOnUserMessage pr (messageContent m)
             body <- readTVarIO (prCurrentBody pr)
             tags <- readTVarIO (prCurrentTags pr)
             prApprove pr body tags
@@ -293,20 +312,24 @@ deregister cfg key =
 -- On failure, post an error message instead.
 handleRevision :: PendingReview -> Text -> DiscordHandler ()
 handleRevision pr feedback = do
+  liftIO $ prOnUserMessage pr feedback
   result <- liftIO $ do
     currentBody <- readTVarIO (prCurrentBody pr)
     try (prRevise pr currentBody feedback) :: IO (Either SomeException (Text, [Text]))
   case result of
-    Left ex ->
+    Left ex -> do
+      let errMsg = "Could not revise draft: " <> T.pack (displayException ex)
+      liftIO $ putStrLn $ "[Drafts] Gemini error: " <> T.unpack errMsg
       void $
         restCall $
           CreateMessage
             (prThreadId pr)
-            (emojiWarning <> " Could not revise draft: " <> T.pack (show ex))
+            (emojiWarning <> " " <> errMsg)
     Right (newBody, newTags) -> do
       liftIO $ atomically $ do
         writeTVar (prCurrentBody pr) newBody
         writeTVar (prCurrentTags pr) newTags
+      liftIO $ prOnBotMessage pr newBody
       hdl <- ask
       liftIO $ postChunked hdl (prThreadId pr) (emojiRevise <> " **Revised draft:**\n\n") newBody
 
@@ -334,79 +357,6 @@ emojiReject = "\x274c" -- ❌
 emojiDraft = "\x1f4dd" -- 📝
 emojiRevise = "\x270f\xfe0f" -- ✏️
 emojiWarning = "\x26a0\xfe0f" -- ⚠️
-
--- | Truncate body text to at most @maxLen@ characters at a word boundary,
--- stripping trailing punctuation and appending '\x2026' (…) when truncated.
-mkEmbedPreview :: Int -> Text -> Text
-mkEmbedPreview maxLen body
-  | T.length body <= maxLen = body
-  | otherwise =
-      let window = T.take maxLen body
-          trimmed = case T.breakOnEnd " " window of
-            (pre, _) | not (T.null pre) -> T.dropWhileEnd (== ' ') pre
-            _ -> window
-          clean = T.dropWhileEnd (`elem` (",;:—-" :: String)) trimmed
-       in clean <> "\x2026"
-
--- | Split 'Text' into chunks of at most @maxLen@ characters.
--- Break priority (highest to lowest):
---   1. Last @\\n\\n@ paragraph boundary within the window
---   2. Last @\\n@ line boundary within the window
---   3. Last word boundary (space) within the window
---   4. Hard cut at @maxLen@ (only when no whitespace exists at all,
---      e.g. an extremely long URL or code token)
-chunkText :: Int -> Text -> [Text]
-chunkText maxLen = filter (not . T.null) . map T.strip . go
-  where
-    go t
-      | T.length t <= maxLen = [t]
-      | otherwise =
-          let window = T.take maxLen t
-              remaining = T.drop maxLen t
-              (chunk, leftover) = bestSplit window
-           in case currentFenceOpener chunk of
-                Nothing ->
-                  chunk : go (leftover <> remaining)
-                Just opener ->
-                  -- Split inside a code fence: close it here, reopen next chunk.
-                  (chunk <> "\n```") : go (opener <> "\n" <> leftover <> remaining)
-
-    bestSplit window =
-      case breakLast "\n\n" window of
-        Just p -> p
-        Nothing -> case breakLast "\n" window of
-          Just p -> p
-          Nothing -> fromMaybe (window, "") (breakLastWord window)
-
-    -- \| Returns the opening fence line (e.g. @\"```haskell\"@) when @t@ ends
-    -- inside an open code fence, or 'Nothing' if we are outside a fence.
-    -- Walks through lines treating any @```@-prefixed line as a toggle.
-    currentFenceOpener :: Text -> Maybe Text
-    currentFenceOpener = stepLines Nothing . T.lines
-      where
-        stepLines state [] = state
-        stepLines Nothing (l : ls)
-          | "```" `T.isPrefixOf` T.strip l = stepLines (Just (T.strip l)) ls
-          | otherwise = stepLines Nothing ls
-        stepLines (Just opener) (l : ls)
-          | T.strip l == "```" = stepLines Nothing ls
-          | otherwise = stepLines (Just opener) ls
-
-    -- \| Split at the last occurrence of @sep@, returning
-    -- @(part before and including sep, part after sep)@.
-    breakLast sep t =
-      let parts = T.splitOn sep t
-       in if length parts <= 1
-            then Nothing
-            else Just (T.intercalate sep (init parts) <> sep, last parts)
-
-    -- \| Split at the last space in @t@, returning
-    -- @(part up to and including the space, part after the space)@.
-    -- Returns 'Nothing' when there is no space in @t@.
-    breakLastWord t =
-      case T.breakOnEnd " " t of
-        ("", _) -> Nothing
-        (pre, suf) -> Just (pre, suf)
 
 -- | Post a (potentially long) body to a Discord channel, splitting it into
 -- multiple messages of at most 1900 characters each. The @header@ is

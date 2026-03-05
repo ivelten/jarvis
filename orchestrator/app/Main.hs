@@ -1,36 +1,17 @@
 module Main (main) where
 
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeException, displayException, try)
 import qualified Data.ByteString.Char8 as BC
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import qualified Data.Text as T
-import Data.Time (getCurrentTime)
-import Database.Persist.Sql (entityKey, entityVal, update, (=.))
 import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
-import Orchestrator.AI.Client
-  ( AiConfig (..),
-    DiscoveredContent (..),
-    GeneratedDraft (..),
-    generateDraft,
-    reviseDraft,
-    toSlug,
-  )
-import Orchestrator.Database.Connection (DbPool, createPool, migrateDatabase, runDb)
-import Orchestrator.Database.Entities
-import Orchestrator.Database.Models (ContentStatus (..))
-import Orchestrator.Discord.Bot
-  ( DiscordConfig (..),
-    ReviewRequest (..),
-    mkDiscordConfig,
-    registerForReview,
-    startBot,
-  )
-import Orchestrator.GitHub.Client (GitHubConfig (..), commitPost, defaultApiBase, triggerDeploy)
-import Orchestrator.Posts.Generator (renderHugoPost)
-import Orchestrator.Topics.Selector (ingestDiscoveredContent, pendingContent)
+import Orchestrator.AI.Client (AiConfig (..))
+import Orchestrator.Database.Connection (createPool, migrateDatabase)
+import Orchestrator.Discord.Bot (mkDiscordConfig, startBot)
+import Orchestrator.GitHub.Client (GitHubConfig (..), defaultApiBase)
+import Orchestrator.Pipeline (PipelineEnv (..), runDiscovery, runDraftGeneration)
 import System.Envy (FromEnv (..), decodeEnv, env, envMaybe)
 import System.Exit (exitFailure)
 import System.IO (BufferMode (..), hSetBuffering, stdout)
@@ -90,102 +71,8 @@ instance FromEnv Config where
       <*> (fromMaybe 3600 <$> envMaybe "DRAFT_INTERVAL_SECS")
 
 -- ---------------------------------------------------------------------------
--- Independent pipeline steps
--- ---------------------------------------------------------------------------
-
--- | Ask Gemini to discover new content and persist it to the database.
--- Runs on its own schedule, independently of draft generation.
-runDiscovery :: AiConfig -> DbPool -> IO ()
-runDiscovery aiCfg pool = do
-  putStrLn "[Discovery] Discovering content via Gemini..."
-  runDb pool (ingestDiscoveredContent aiCfg)
-  putStrLn "[Discovery] Done."
-
--- | Pick the next pending content item, generate a Markdown draft, and
--- register it for Discord review.  The approve/reject callbacks fire
--- as soon as the reviewer reacts or types an approval in the Discord thread.
-runDraftGeneration :: AiConfig -> GitHubConfig -> DiscordConfig -> DbPool -> IO ()
-runDraftGeneration aiCfg ghCfg dcCfg pool = do
-  pending <- runDb pool pendingContent
-  case pending of
-    [] -> putStrLn "[Drafts] No pending content to process. Skipping."
-    (item : _) -> processDraft (entityKey item) (entityVal item)
-  where
-    processDraft rcKey rc = do
-      putStrLn $ "[Drafts] Generating draft for: " <> T.unpack (rawContentTitle rc)
-      draft <- generateDraft aiCfg [rcToDiscovered rc]
-      now <- getCurrentTime
-      let title = gdTitle draft
-          slug = toSlug title
-          filename = slug <> ".md"
-          revise currentBody feedback =
-            (\d -> (gdBody d, gdTags d)) <$> reviseDraft aiCfg title currentBody feedback
-      -- Mark as drafted immediately so restarts don't re-pick this item.
-      runDb pool $
-        update
-          rcKey
-          [ RawContentStatus =. ContentDrafted,
-            RawContentUpdatedAt =. now
-          ]
-      putStrLn "[Drafts] Draft sent to Discord for review."
-      registerForReview
-        dcCfg
-        ReviewRequest
-          { rrTitle = title,
-            rrBody = gdBody draft,
-            rrTags = gdTags draft,
-            rrRevise = revise,
-            rrApprove = onApprove rcKey filename title slug now,
-            rrReject = onReject rcKey
-          }
-
-    onApprove rcKey filename title slug now finalBody tags = do
-      let mdContent = renderHugoPost title slug now tags finalBody
-      putStrLn $ "[Drafts] Approved! Committing " <> T.unpack filename <> " to GitHub..."
-      result <-
-        ( try $ do
-            commitPost ghCfg filename mdContent
-            putStrLn "[Drafts] Triggering deploy workflow..."
-            triggerDeploy ghCfg
-        ) ::
-          IO (Either SomeException ())
-      case result of
-        Right () -> putStrLn "[Drafts] Deployed."
-        Left ex -> do
-          failedAt <- getCurrentTime
-          runDb pool $
-            update
-              rcKey
-              [ RawContentStatus =. ContentNew,
-                RawContentUpdatedAt =. failedAt
-              ]
-          putStrLn $ "[Drafts] Commit/deploy failed; reset to pending. Error: " <> show ex
-          ioError (userError (show ex))
-
-    onReject rcKey reason = do
-      rejectedAt <- getCurrentTime
-      runDb pool $
-        update
-          rcKey
-          [ RawContentStatus =. ContentRejected,
-            RawContentUpdatedAt =. rejectedAt
-          ]
-      putStrLn $ "[Drafts] Draft rejected: " <> T.unpack reason
-
--- ---------------------------------------------------------------------------
 -- Utilities
 -- ---------------------------------------------------------------------------
-
--- | Convert a database 'RawContent' row into a 'DiscoveredContent' value
---   suitable for passing to 'generateDraft'.
-rcToDiscovered :: RawContent -> DiscoveredContent
-rcToDiscovered rc =
-  DiscoveredContent
-    { dcTitle = rawContentTitle rc,
-      dcUrl = rawContentUrl rc,
-      dcSummary = rawContentSummary rc,
-      dcSubject = Nothing
-    }
 
 -- | Sleep for @n@ seconds (converts to microseconds for 'threadDelay').
 sleepSecs :: Int -> IO ()
@@ -197,7 +84,7 @@ scheduledLoop :: String -> Int -> IO () -> IO ()
 scheduledLoop prefix intervalSecs action = do
   result <- try action :: IO (Either SomeException ())
   case result of
-    Left ex -> putStrLn $ prefix <> " Error: " <> show ex
+    Left ex -> putStrLn $ prefix <> " Error: " <> displayException ex
     Right () -> pure ()
   putStrLn $ prefix <> " Sleeping for " <> show intervalSecs <> "s."
   sleepSecs intervalSecs
@@ -251,19 +138,27 @@ main = do
   migrateDatabase pool
   putStrLn "[Jarvis] Database ready."
 
+  let pipeEnv =
+        PipelineEnv
+          { pipeAiCfg = aiCfg,
+            pipeGhCfg = ghCfg,
+            pipeDcCfg = dcCfg,
+            pipeDbPool = pool
+          }
+
   _ <-
     forkIO $
       scheduledLoop
         "[Discovery]"
         (cfgDiscoveryIntervalSecs cfg)
-        (runDiscovery aiCfg pool)
+        (runDiscovery pipeEnv)
 
   _ <-
     forkIO $
       scheduledLoop
         "[Drafts]"
         (cfgDraftIntervalSecs cfg)
-        (runDraftGeneration aiCfg ghCfg dcCfg pool)
+        (runDraftGeneration pipeEnv)
 
   putStrLn "[Jarvis] All workers started. Discord bot running..."
   startBot dcCfg

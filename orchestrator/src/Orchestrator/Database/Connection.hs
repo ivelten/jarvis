@@ -2,14 +2,12 @@ module Orchestrator.Database.Connection
   ( DbPool,
     createPool,
     runDb,
-    withDb,
     migrateDatabase,
   )
 where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Logger (runStdoutLoggingT)
-import Control.Monad.Reader (ReaderT)
 import qualified Data.Pool as Pool
 import Database.Persist.Postgresql
   ( ConnectionString,
@@ -45,10 +43,6 @@ createPool connStr =
 -- | Run a database action against the pool.
 runDb :: (MonadIO m) => DbPool -> SqlPersistT IO a -> m a
 runDb pool action = liftIO $ runSqlPool action pool
-
--- | Alias kept for symmetry with other frameworks.
-withDb :: (MonadIO m) => DbPool -> SqlPersistT IO a -> m a
-withDb = runDb
 
 -- ---------------------------------------------------------------------------
 -- Migrations

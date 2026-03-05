@@ -10,8 +10,10 @@ import Control.Concurrent.STM
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import qualified Data.Text as T
 import Discord.Types (ChannelId, DiscordId (..), Snowflake (..))
 import Orchestrator.Discord.Bot
+import Orchestrator.TextUtils (chunkText)
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -41,9 +43,12 @@ simulateDrain cfg key = do
             prThreadId = testThreadId,
             prRevise = rrRevise req,
             prApprove = rrApprove req,
-            prReject = rrReject req
+            prReject = rrReject req,
+            prOnUserMessage = rrOnUserMessage req,
+            prOnBotMessage = rrOnBotMessage req
           }
   atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert key pr)
+  rrOnThreadCreated req key
   pure pr
 
 -- | Simulate what 'eventHandler' does for a 'MessageReactionAdd': atomically
@@ -62,12 +67,16 @@ simulateReaction cfg key =
 -- | Simulate what 'eventHandler' does for a 'MessageCreate' inside a forum thread:
 -- if 'isApprovalMessage' matches, deregister and run 'prApprove';
 -- otherwise run the revision and update 'prCurrentBody'.
+-- Mirrors the real @handleRevision@ / @eventHandler@ behaviour:
+--   * 'prOnUserMessage' is always called with the incoming text.
+--   * 'prOnBotMessage' is called with the new body after a successful revision.
 simulateThreadMessage :: DiscordConfig -> Text -> Text -> IO ()
 simulateThreadMessage cfg key content = do
   rm <- readTVarIO (dcReviewMap cfg)
   case Map.lookup key rm of
     Nothing -> pure ()
-    Just pr ->
+    Just pr -> do
+      prOnUserMessage pr content
       if isApprovalMessage content
         then do
           atomically $ modifyTVar' (dcReviewMap cfg) (Map.delete key)
@@ -80,6 +89,7 @@ simulateThreadMessage cfg key content = do
           atomically $ do
             writeTVar (prCurrentBody pr) newBody
             writeTVar (prCurrentTags pr) newTags
+          prOnBotMessage pr newBody
 
 -- ---------------------------------------------------------------------------
 
@@ -115,7 +125,7 @@ spec = do
   describe "registerForReview" $ do
     it "queues the request with the correct title and body" $ do
       cfg <- mkDiscordConfig "token" 1 2
-      registerForReview cfg ReviewRequest {rrTitle = "My Title", rrBody = "My Body", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \_ _ -> pure (), rrReject = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "My Title", rrBody = "My Body", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \_ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       req <- takeMVar (dcSendQueue cfg)
       rrTitle req `shouldBe` "My Title"
       rrBody req `shouldBe` "My Body"
@@ -123,8 +133,8 @@ spec = do
     it "fires the approve callback with the current body when \x2705 is received" $ do
       cfg <- mkDiscordConfig "token" 1 2
       result <- newIORef ("" :: Text)
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "original-body", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \body _tags -> writeIORef result body, rrReject = \_ -> pure ()}
-      pr <- simulateDrain cfg "key-1"
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "original-body", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \body _tags -> writeIORef result body, rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
+      _ <- simulateDrain cfg "key-1"
       Just pr' <- simulateReaction cfg "key-1"
       do
         body <- readTVarIO (prCurrentBody pr')
@@ -135,7 +145,7 @@ spec = do
     it "fires the reject callback with the emoji when \x274c is received" $ do
       cfg <- mkDiscordConfig "token" 1 2
       rejectRef <- newIORef ("" :: Text)
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \_ _ -> pure (), rrReject = writeIORef rejectRef}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \_ _ -> pure (), rrReject = writeIORef rejectRef, rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-2"
       Just pr <- simulateReaction cfg "key-2"
       prReject pr "\x274c"
@@ -147,7 +157,7 @@ spec = do
       let onApprove _ _ = do
             rm <- readTVarIO (dcReviewMap cfg)
             writeIORef mapSizeRef (Map.size rm)
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = onApprove, rrReject = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = onApprove, rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-3"
       Just pr <- simulateReaction cfg "key-3"
       do
@@ -162,11 +172,11 @@ spec = do
       resultB <- newIORef ("" :: Text)
       registerForReview
         cfg
-        ReviewRequest {rrTitle = "A", rrBody = "bodyA", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \body _tags -> writeIORef resultA body, rrReject = \_ -> writeIORef resultA "rejected"}
+        ReviewRequest {rrTitle = "A", rrBody = "bodyA", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \body _tags -> writeIORef resultA body, rrReject = \_ -> writeIORef resultA "rejected", rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       prA <- simulateDrain cfg "key-A"
       registerForReview
         cfg
-        ReviewRequest {rrTitle = "B", rrBody = "bodyB", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \body _tags -> writeIORef resultB body, rrReject = writeIORef resultB}
+        ReviewRequest {rrTitle = "B", rrBody = "bodyB", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \body _tags -> writeIORef resultB body, rrReject = writeIORef resultB, rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       prB <- simulateDrain cfg "key-B"
       Just _ <- simulateReaction cfg "key-A"
       Just _ <- simulateReaction cfg "key-B"
@@ -183,14 +193,14 @@ spec = do
       cfg <- mkDiscordConfig "token" 1 2
       revCount <- newIORef (0 :: Int)
       let revise _body _feedback = modifyIORef revCount (+ 1) >> pure ("revised", [])
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrTags = [], rrRevise = revise, rrApprove = \_ _ -> pure (), rrReject = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrTags = [], rrRevise = revise, rrApprove = \_ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-r1"
       simulateThreadMessage cfg "key-r1" "please add more examples"
       readIORef revCount `shouldReturn` 1
 
     it "updates the current body after a revision" $ do
       cfg <- mkDiscordConfig "token" 1 2
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrTags = [], rrRevise = \_ _ -> pure ("revised", []), rrApprove = \_ _ -> pure (), rrReject = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrTags = [], rrRevise = \_ _ -> pure ("revised", []), rrApprove = \_ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       pr <- simulateDrain cfg "key-r2"
       simulateThreadMessage cfg "key-r2" "make it shorter"
       readTVarIO (prCurrentBody pr) `shouldReturn` "revised"
@@ -199,7 +209,7 @@ spec = do
       cfg <- mkDiscordConfig "token" 1 2
       result <- newIORef ("" :: Text)
       -- First revision changes body to "revised"; second approval should fire with "revised".
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrTags = [], rrRevise = \_ _ -> pure ("revised", []), rrApprove = \body _tags -> writeIORef result body, rrReject = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "initial", rrTags = [], rrRevise = \_ _ -> pure ("revised", []), rrApprove = \body _tags -> writeIORef result body, rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-ap"
       simulateThreadMessage cfg "key-ap" "add examples"
       simulateThreadMessage cfg "key-ap" "publish"
@@ -207,7 +217,7 @@ spec = do
 
     it "removes both maps when approved via thread message" $ do
       cfg <- mkDiscordConfig "token" 1 2
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \_ _ -> pure (), rrReject = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBody = "B", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \_ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-cl"
       simulateThreadMessage cfg "key-cl" "looks good"
       rm <- readTVarIO (dcReviewMap cfg)
@@ -238,3 +248,128 @@ spec = do
     it "closes and reopens a code fence when splitting inside it" $
       chunkText 20 "```haskell\nfoo\nbar\nbaz\n```"
         `shouldBe` ["```haskell\nfoo\nbar\n\n```", "```haskell\nbaz\n```"]
+
+  describe "callback contract" $ do
+    it "rrOnThreadCreated is called with the thread key after drain" $ do
+      cfg <- mkDiscordConfig "token" 1 2
+      calledWith <- newIORef ("" :: Text)
+      registerForReview
+        cfg
+        ReviewRequest
+          { rrTitle = "T",
+            rrBody = "B",
+            rrTags = [],
+            rrRevise = \_ _ -> pure ("", []),
+            rrApprove = \_ _ -> pure (),
+            rrReject = \_ -> pure (),
+            rrOnThreadCreated = writeIORef calledWith,
+            rrOnUserMessage = \_ -> pure (),
+            rrOnBotMessage = \_ -> pure ()
+          }
+      _ <- simulateDrain cfg "key-tc"
+      readIORef calledWith `shouldReturn` "key-tc"
+
+    it "rrOnUserMessage is called with the feedback text" $ do
+      cfg <- mkDiscordConfig "token" 1 2
+      msgs <- newIORef ([] :: [Text])
+      registerForReview
+        cfg
+        ReviewRequest
+          { rrTitle = "T",
+            rrBody = "initial",
+            rrTags = [],
+            rrRevise = \_ _ -> pure ("revised", []),
+            rrApprove = \_ _ -> pure (),
+            rrReject = \_ -> pure (),
+            rrOnThreadCreated = \_ -> pure (),
+            rrOnUserMessage = \m -> modifyIORef msgs (<> [m]),
+            rrOnBotMessage = \_ -> pure ()
+          }
+      _ <- simulateDrain cfg "key-um"
+      simulateThreadMessage cfg "key-um" "add more examples"
+      readIORef msgs `shouldReturn` ["add more examples"]
+
+    it "rrOnUserMessage is called with the approval text on text-approval" $ do
+      cfg <- mkDiscordConfig "token" 1 2
+      msgs <- newIORef ([] :: [Text])
+      registerForReview
+        cfg
+        ReviewRequest
+          { rrTitle = "T",
+            rrBody = "B",
+            rrTags = [],
+            rrRevise = \_ _ -> pure ("", []),
+            rrApprove = \_ _ -> pure (),
+            rrReject = \_ -> pure (),
+            rrOnThreadCreated = \_ -> pure (),
+            rrOnUserMessage = \m -> modifyIORef msgs (<> [m]),
+            rrOnBotMessage = \_ -> pure ()
+          }
+      _ <- simulateDrain cfg "key-ua"
+      simulateThreadMessage cfg "key-ua" "looks good to me"
+      readIORef msgs `shouldReturn` ["looks good to me"]
+
+    it "rrOnBotMessage is called with the revised body after a revision" $ do
+      cfg <- mkDiscordConfig "token" 1 2
+      botMsgs <- newIORef ([] :: [Text])
+      registerForReview
+        cfg
+        ReviewRequest
+          { rrTitle = "T",
+            rrBody = "initial",
+            rrTags = [],
+            rrRevise = \_ _ -> pure ("revised-body", []),
+            rrApprove = \_ _ -> pure (),
+            rrReject = \_ -> pure (),
+            rrOnThreadCreated = \_ -> pure (),
+            rrOnUserMessage = \_ -> pure (),
+            rrOnBotMessage = \m -> modifyIORef botMsgs (<> [m])
+          }
+      _ <- simulateDrain cfg "key-bm"
+      simulateThreadMessage cfg "key-bm" "shorten it"
+      readIORef botMsgs `shouldReturn` ["revised-body"]
+
+    it "rrOnBotMessage accumulates across multiple revisions" $ do
+      cfg <- mkDiscordConfig "token" 1 2
+      botMsgs <- newIORef ([] :: [Text])
+      counter <- newIORef (0 :: Int)
+      let revise _ _ = do
+            n <- modifyIORef counter (+ 1) >> readIORef counter
+            pure ("rev-" <> T.pack (show n), [])
+      registerForReview
+        cfg
+        ReviewRequest
+          { rrTitle = "T",
+            rrBody = "initial",
+            rrTags = [],
+            rrRevise = revise,
+            rrApprove = \_ _ -> pure (),
+            rrReject = \_ -> pure (),
+            rrOnThreadCreated = \_ -> pure (),
+            rrOnUserMessage = \_ -> pure (),
+            rrOnBotMessage = \m -> modifyIORef botMsgs (<> [m])
+          }
+      _ <- simulateDrain cfg "key-multi"
+      simulateThreadMessage cfg "key-multi" "first feedback"
+      simulateThreadMessage cfg "key-multi" "second feedback"
+      readIORef botMsgs `shouldReturn` ["rev-1", "rev-2"]
+
+    it "rrOnBotMessage is NOT called on approval" $ do
+      cfg <- mkDiscordConfig "token" 1 2
+      botMsgs <- newIORef ([] :: [Text])
+      registerForReview
+        cfg
+        ReviewRequest
+          { rrTitle = "T",
+            rrBody = "B",
+            rrTags = [],
+            rrRevise = \_ _ -> pure ("", []),
+            rrApprove = \_ _ -> pure (),
+            rrReject = \_ -> pure (),
+            rrOnThreadCreated = \_ -> pure (),
+            rrOnUserMessage = \_ -> pure (),
+            rrOnBotMessage = \m -> modifyIORef botMsgs (<> [m])
+          }
+      _ <- simulateDrain cfg "key-bm-ap"
+      simulateThreadMessage cfg "key-bm-ap" "publish"
+      readIORef botMsgs `shouldReturn` []

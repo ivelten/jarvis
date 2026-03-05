@@ -8,23 +8,22 @@ module Orchestrator.AI.Client
     generateDraft,
     reviseDraft,
     extractText,
+    extractTokenCount,
     parseTagsLine,
-    splitTitle,
-    toSlug,
   )
 where
 
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseMaybe)
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (isAlphaNum, toLower)
 import Data.FileEmbed (embedFile, makeRelativeToProject)
-import Data.Maybe
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import GHC.Generics (Generic)
 import Network.HTTP.Client
+import Orchestrator.TextUtils (splitTitle, toSlug)
 
 -- ---------------------------------------------------------------------------
 -- Types
@@ -75,7 +74,10 @@ data GeneratedDraft = GeneratedDraft
     -- added separately by 'renderHugoPost').
     gdBody :: !Text,
     -- | Tags extracted from the leading @TAGS:@ line of the AI output.
-    gdTags :: ![Text]
+    gdTags :: ![Text],
+    -- | Total tokens consumed by this generation call
+    --   (@usageMetadata.totalTokenCount@ in the Gemini response).
+    gdTokensUsed :: !Int
   }
   deriving (Show, Eq, Generic)
 
@@ -86,6 +88,7 @@ instance FromJSON GeneratedDraft where
       <*> o .: "gdBranch"
       <*> o .: "gdBody"
       <*> (o .:? "gdTags" .!= [])
+      <*> (o .:? "gdTokensUsed" .!= 0)
 
 instance ToJSON GeneratedDraft where
   toJSON GeneratedDraft {..} =
@@ -93,7 +96,8 @@ instance ToJSON GeneratedDraft where
       [ "gdTitle" .= gdTitle,
         "gdBranch" .= gdBranch,
         "gdBody" .= gdBody,
-        "gdTags" .= gdTags
+        "gdTags" .= gdTags,
+        "gdTokensUsed" .= gdTokensUsed
       ]
 
 -- ---------------------------------------------------------------------------
@@ -140,9 +144,10 @@ postGemini cfg body = do
           }
   responseBody <$> httpLbs req (aiManager cfg)
 
--- | POST a request body to Gemini and return the extracted text, raising an
--- 'IOError' on HTTP errors, API error responses, or missing content.
-callGemini :: AiConfig -> Value -> IO Text
+-- | POST a request body to Gemini and return the extracted text and total
+-- token count, raising an 'IOError' on HTTP errors, API error responses, or
+-- missing content.
+callGemini :: AiConfig -> Value -> IO (Text, Int)
 callGemini cfg body = do
   respBody <- postGemini cfg body
   case eitherDecode respBody of
@@ -151,7 +156,7 @@ callGemini cfg body = do
       checkGeminiError v
       case extractText v of
         Nothing -> ioError (userError "Gemini: could not extract text from response")
-        Just txt -> pure txt
+        Just txt -> pure (txt, extractTokenCount v)
 
 -- | Build a @contents@ array with a single user turn.
 userContents :: Text -> Value
@@ -160,6 +165,15 @@ userContents prompt =
     [ "role" .= ("user" :: Text),
       "parts" .= [object ["text" .= prompt]]
     ]
+
+-- | Extract @usageMetadata.totalTokenCount@ from a Gemini response.
+-- Returns 0 when the field is absent (e.g. in grounded-search responses).
+extractTokenCount :: Value -> Int
+extractTokenCount = fromMaybe 0 . parseMaybe go
+  where
+    go = withObject "GeminiResponse" $ \o -> do
+      usage <- o .: "usageMetadata"
+      usage .: "totalTokenCount"
 
 -- | Extract the text payload from the first candidate's first part.
 --   Gemini wraps generated content in:
@@ -231,7 +245,7 @@ defaultGenerationConfig =
 --   content and return it as a structured list.
 discoverContent :: AiConfig -> IO [DiscoveredContent]
 discoverContent cfg = do
-  txt <- callGemini cfg requestBody'
+  (txt, _) <- callGemini cfg requestBody'
   decodeText (stripFences txt)
   where
     -- google_search grounding is incompatible with responseMimeType/responseSchema
@@ -246,10 +260,10 @@ discoverContent cfg = do
 --   content sources.
 generateDraft :: AiConfig -> [DiscoveredContent] -> IO GeneratedDraft
 generateDraft cfg sources = do
-  mdText <- callGemini cfg requestBody'
+  (mdText, tokensUsed) <- callGemini cfg requestBody'
   let (tags, body) = parseTagsLine mdText
       (title, _) = splitTitle body
-  pure GeneratedDraft {gdTitle = title, gdBranch = "draft/" <> toSlug title, gdBody = body, gdTags = tags}
+  pure GeneratedDraft {gdTitle = title, gdBranch = "draft/" <> toSlug title, gdBody = body, gdTags = tags, gdTokensUsed = tokensUsed}
   where
     sourcesBlock = T.unlines $ zipWith formatSource ([1 ..] :: [Int]) sources
     formatSource i dc =
@@ -271,12 +285,12 @@ generateDraft cfg sources = do
 --
 -- The returned 'GeneratedDraft' has the same 'gdBranch' derived from the
 -- (possibly updated) title in the revised content.
-reviseDraft :: AiConfig -> Text -> Text -> Text -> IO GeneratedDraft
-reviseDraft cfg _title currentBody feedback = do
-  mdText <- callGemini cfg requestBody'
+reviseDraft :: AiConfig -> Text -> Text -> IO GeneratedDraft
+reviseDraft cfg currentBody feedback = do
+  (mdText, tokensUsed) <- callGemini cfg requestBody'
   let (tags, body) = parseTagsLine mdText
       (title', _) = splitTitle body
-  pure GeneratedDraft {gdTitle = title', gdBranch = "draft/" <> toSlug title', gdBody = body, gdTags = tags}
+  pure GeneratedDraft {gdTitle = title', gdBranch = "draft/" <> toSlug title', gdBody = body, gdTags = tags, gdTokensUsed = tokensUsed}
   where
     prompt =
       T.replace "{{DRAFT}}" currentBody $
@@ -305,18 +319,3 @@ parseTagsLine txt = case T.lines txt of
         let tags = filter (not . T.null) . map T.strip . T.splitOn "," $ raw
          in (tags, T.strip (T.unlines rest))
   _ -> ([], txt)
-
--- | Split the first H1 heading from the document body.
-splitTitle :: Text -> (Text, Text)
-splitTitle txt =
-  case T.lines txt of
-    (h : rest) -> (T.strip (T.dropWhile (== '#') h), T.unlines rest)
-    [] -> ("Untitled", txt)
-
--- | Convert a title into a URL-safe slug.
-toSlug :: Text -> Text
-toSlug =
-  T.intercalate "-"
-    . filter (not . T.null)
-    . T.splitOn " "
-    . T.map (\c -> if isAlphaNum c || c == ' ' then toLower c else ' ')

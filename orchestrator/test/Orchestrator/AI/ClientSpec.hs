@@ -8,6 +8,7 @@ import Data.Aeson (Value, decode, encode, object, (.=))
 import Data.Text (Text)
 import qualified Data.Text as T
 import Orchestrator.AI.Client
+import Orchestrator.TextUtils (splitTitle, toSlug)
 import Test.Hspec
 
 spec :: Spec

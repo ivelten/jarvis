@@ -10,7 +10,7 @@ module Orchestrator.GitHub.ClientSpec (spec) where
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar
 import Control.Exception (SomeException, bracket, try)
-import Data.Aeson (FromJSON, Key, Value, object, (.=))
+import Data.Aeson (FromJSON, Key, Value)
 import Data.Aeson.Types (parseMaybe, withObject, (.:))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64

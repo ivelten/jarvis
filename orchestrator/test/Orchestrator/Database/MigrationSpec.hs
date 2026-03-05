@@ -108,6 +108,9 @@ spec = do
       it "persists and reads back DraftPublished" $
         roundTripDraftStatus pool DraftPublished
 
+      it "persists and reads back DraftRejected" $
+        roundTripDraftStatus pool DraftRejected
+
   describe "CommentAuthor persistence" $
     before_ (truncateTestTables pool) $ do
       it "persists and reads back CommentAuthorUser" $

@@ -54,9 +54,12 @@ library
     Orchestrator.Database.TH
     Orchestrator.Discord.Bot
     Orchestrator.GitHub.Client
+    Orchestrator.Pipeline
     Orchestrator.Posts.Generator
+    Orchestrator.TextUtils
     Orchestrator.Topics.Selector
 
+  ghc-options: -Wall
   build-depends:
     -- Database
     -- HTTP / AI
@@ -94,6 +97,7 @@ executable orchestrator
     persistent >=2.14,
 
   ghc-options:
+    -Wall
     -threaded
     -rtsopts
     -with-rtsopts=-N
@@ -134,6 +138,7 @@ test-suite orchestrator-test
     stm >=2.5,
 
   ghc-options:
+    -Wall
     -threaded
     -rtsopts
     -with-rtsopts=-N

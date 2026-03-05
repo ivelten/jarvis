@@ -13,13 +13,10 @@ where
 
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
-import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import GHC.Generics (Generic)
 import Network.HTTP.Client
 import Network.HTTP.Types (RequestHeaders, status404, statusCode)
 
