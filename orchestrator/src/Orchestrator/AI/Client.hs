@@ -3,26 +3,46 @@
 module Orchestrator.AI.Client
   ( AiConfig (..),
     DiscoveredContent (..),
+    ModelItem (..),
     GeneratedDraft (..),
     discoverContent,
     generateDraft,
     reviseDraft,
     extractText,
     extractTokenCount,
+    extractGroundingChunks,
+    resolveRedirectUrl,
+    mergeWithChunks,
+    followRedirect,
     parseTagsLine,
   )
 where
 
+import Control.Exception (SomeException, try)
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseMaybe)
 import qualified Data.ByteString.Lazy as LBS
 import Data.FileEmbed (embedFile, makeRelativeToProject)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import GHC.Generics (Generic)
 import Network.HTTP.Client
+  ( Manager,
+    Request (..),
+    RequestBody (..),
+    httpLbs,
+    parseRequest,
+    responseBody,
+    responseHeaders,
+    responseStatus,
+    responseTimeout,
+    responseTimeoutMicro,
+  )
+import Network.HTTP.Types (statusCode)
 import Orchestrator.TextUtils (splitTitle, toSlug)
 
 -- ---------------------------------------------------------------------------
@@ -47,6 +67,22 @@ data DiscoveredContent = DiscoveredContent
     dcSubject :: !(Maybe Text)
   }
   deriving (Show, Eq, Generic)
+
+-- | Raw model output from the discovery prompt (no URL — URLs come from
+-- grounding chunks via 'mergeWithChunks').
+data ModelItem = ModelItem
+  { miTitle :: !Text,
+    miSummary :: !Text,
+    miSubject :: !(Maybe Text)
+  }
+  deriving (Show, Eq, Generic)
+
+instance FromJSON ModelItem where
+  parseJSON = withObject "ModelItem" $ \o ->
+    ModelItem
+      <$> o .: "title"
+      <*> o .: "summary"
+      <*> o .:? "subject"
 
 instance FromJSON DiscoveredContent where
   parseJSON = withObject "DiscoveredContent" $ \o ->
@@ -241,13 +277,130 @@ defaultGenerationConfig =
 -- Public API
 -- ---------------------------------------------------------------------------
 
+-- | Extract (chunkTitle, realUri) pairs from Gemini's grounding metadata.
+--
+-- When the @google_search@ grounding tool is active, Gemini embeds ephemeral
+-- @vertexaisearch.cloud.google.com\/grounding-api-redirect\/...@ URLs in the
+-- generated text, but the real, permanent source URLs are available in
+-- @candidates[0].groundingMetadata.groundingChunks[].web.uri@.  This
+-- function extracts them so they can be substituted back into the parsed items.
+extractGroundingChunks :: Value -> [(Text, Text)]
+extractGroundingChunks = fromMaybe [] . parseMaybe go
+  where
+    go = withObject "GeminiResponse" $ \o -> do
+      candidates <- o .: "candidates"
+      case candidates of
+        [] -> pure []
+        (c : _) -> do
+          meta <- c .: "groundingMetadata"
+          chunks <- meta .: "groundingChunks"
+          mapM parseChunk chunks
+    parseChunk = withObject "GroundingChunk" $ \o -> do
+      web <- o .: "web"
+      uri <- web .: "uri"
+      title <- web .:? "title" .!= uri
+      pure (title, uri)
+
+-- | If a 'DiscoveredContent' item has an ephemeral redirect URL, attempt to
+-- replace it with the matching real URL from the grounding chunk map.
+-- Matching is done by case-insensitive substring containment against the
+-- chunk titles.  If no match is found the original (redirect) URL is kept.
+resolveRedirectUrl :: Map Text Text -> DiscoveredContent -> DiscoveredContent
+resolveRedirectUrl chunkMap dc
+  | not ("vertexaisearch" `T.isInfixOf` dcUrl dc) = dc
+  | otherwise = dc {dcUrl = fromMaybe (dcUrl dc) (findMatch (dcTitle dc))}
+  where
+    findMatch modelTitle =
+      listToMaybe
+        [ uri
+          | (chunkTitle, uri) <- Map.toList chunkMap,
+            let a = T.toCaseFold chunkTitle
+                b = T.toCaseFold modelTitle,
+            a `T.isInfixOf` b || b `T.isInfixOf` a
+        ]
+
+-- | Pair each 'ModelItem' with the best-matching grounding chunk to obtain a
+-- real, permanent source URL.  Items with no matching chunk are dropped.
+--
+-- Matching uses keyword overlap: at least one significant word (five or more
+-- characters) from either title must appear as a substring of the other
+-- (case-insensitive).
+mergeWithChunks :: [(Text, Text)] -> [ModelItem] -> [DiscoveredContent]
+mergeWithChunks chunks = mapMaybe matchItem
+  where
+    matchItem mi =
+      case findChunk (miTitle mi) of
+        Nothing -> Nothing
+        Just (_, uri) ->
+          Just $ DiscoveredContent (miTitle mi) uri (miSummary mi) (miSubject mi)
+
+    findChunk modelTitle =
+      listToMaybe
+        [ chunk
+          | chunk@(chunkTitle, _) <- chunks,
+            overlaps (T.toCaseFold modelTitle) (T.toCaseFold chunkTitle)
+        ]
+
+    overlaps a b =
+      any (\w -> T.length w >= 5 && w `T.isInfixOf` b) (T.words a)
+        || any (\w -> T.length w >= 5 && w `T.isInfixOf` a) (T.words b)
+
+-- | Follow a single HTTP redirect and return the resolved permanent URL.
+--
+-- Makes a GET request with redirect-following disabled (@redirectCount = 0@)
+-- and reads the @Location@ response header.  This resolves ephemeral
+-- @vertexaisearch.cloud.google.com\/grounding-api-redirect\/...@ URLs to the
+-- real article URL while the redirect token is still valid (i.e. immediately
+-- after the Gemini API call that produced it).
+--
+-- Non-redirect URLs (no @vertexaisearch@ substring) are returned unchanged.
+-- If the server returns no @Location@ header the original URL is kept.
+followRedirect :: Manager -> Text -> IO Text
+followRedirect mgr url
+  | not ("vertexaisearch" `T.isInfixOf` url) = pure url
+  | otherwise = do
+      req <- parseRequest (T.unpack url)
+      resp <- httpLbs req {redirectCount = 0} mgr
+      pure $ maybe url TE.decodeUtf8 (lookup "Location" (responseHeaders resp))
+
+-- | Verify that a URL resolves to a 200 response.
+--
+-- Issues a GET request and returns 'True' only when the HTTP status code is
+-- 200.  Any network error or non-200 status yields 'False', so a single
+-- broken URL does not abort the whole discovery batch.
+checkUrl :: Manager -> Text -> IO Bool
+checkUrl mgr url = do
+  result <- (try :: IO Int -> IO (Either SomeException Int)) $ do
+    req <- parseRequest (T.unpack url)
+    resp <- httpLbs req mgr
+    pure $ statusCode (responseStatus resp)
+  pure $ case result of
+    Right 200 -> True
+    _ -> False
+
 -- | Ask Gemini (with Google Search grounding) to discover recent, relevant
 --   content and return it as a structured list.
+--
+-- The model provides redirect URLs for each item.  These are followed
+-- immediately (while still valid) via 'followRedirect' to obtain the real,
+-- permanent source URLs.  The HTML body of each resolved URL is then fetched
+-- generator.
 discoverContent :: AiConfig -> IO [DiscoveredContent]
 discoverContent cfg = do
   (txt, _) <- callGemini cfg requestBody'
-  decodeText (stripFences txt)
+  items <- decodeText (stripFences txt) :: IO [DiscoveredContent]
+  results <- mapM (resolveItem (aiManager cfg)) items
+  pure (catMaybes results)
   where
+    resolveItem mgr dc = do
+      realUrl <- followRedirect mgr (dcUrl dc)
+      -- Discard items whose URL is still on the vertexaisearch proxy domain
+      -- (redirect failed) or whose resolved URL returns a non-200 status.
+      if "vertexaisearch" `T.isInfixOf` realUrl
+        then pure Nothing
+        else do
+          ok <- checkUrl mgr realUrl
+          pure $ if ok then Just dc {dcUrl = realUrl} else Nothing
     -- google_search grounding is incompatible with responseMimeType/responseSchema
     -- JSON mode; the prompt instructs the model to return JSON directly.
     requestBody' =

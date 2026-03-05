@@ -55,11 +55,28 @@ chunkText maxLen = filter (not . T.null) . map T.strip . go
                   (chunk <> "\n```") : go (opener <> "\n" <> leftover <> remaining)
 
     bestSplit window =
-      case breakLast "\n\n" window of
-        Just p -> p
-        Nothing -> case breakLast "\n" window of
+      repairMarkdownLink $
+        case breakLast "\n\n" window of
           Just p -> p
-          Nothing -> fromMaybe (window, "") (breakLastWord window)
+          Nothing -> case breakLast "\n" window of
+            Just p -> p
+            Nothing -> fromMaybe (window, "") (breakLastWord window)
+
+    -- \| If the chunk ends with an unclosed Markdown link opener @[…@ (i.e. a
+    -- @[@ with no subsequent @](@ before the end of the chunk), retreat the
+    -- split to just before that @[@.  This prevents links in the Further
+    -- Reading section — or anywhere else — from being torn across two
+    -- Discord messages.
+    repairMarkdownLink p@(chunk, leftover) =
+      case T.breakOnEnd "[" chunk of
+        ("", _) -> p -- no '[' in chunk, nothing to repair
+        (beforeIncl, afterOpen)
+          | "](" `T.isInfixOf` afterOpen -> p -- '[' is properly closed within the chunk
+          | otherwise ->
+              let safeChunk = T.stripEnd (T.dropEnd 1 beforeIncl)
+               in if T.null safeChunk
+                    then p -- can't retreat further; leave as-is to avoid an infinite loop
+                    else (safeChunk, T.drop (T.length safeChunk) (chunk <> leftover))
 
     currentFenceOpener :: Text -> Maybe Text
     currentFenceOpener = stepLines Nothing . T.lines

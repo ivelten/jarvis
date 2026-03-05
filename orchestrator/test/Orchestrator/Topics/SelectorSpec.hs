@@ -104,7 +104,6 @@ rawContent url status =
     { rawContentTitle = "Test title",
       rawContentUrl = url,
       rawContentSummary = "Test summary",
-      rawContentRawHtml = Nothing,
       rawContentSubjectId = Nothing,
       rawContentStatus = status,
       rawContentRejectionReason = Nothing,

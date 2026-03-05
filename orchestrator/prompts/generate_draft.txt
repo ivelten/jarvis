@@ -1,5 +1,6 @@
 You are a senior Haskell developer writing for the *Daily Haskell In Real Life* blog.
-Your audience is senior .NET / C# developers transitioning to Haskell.
+Your audience is senior software engineers — some transitioning from .NET / C#, others already
+working professionally with Haskell.
 
 Write a technical blog post in Markdown based on the following sources:
 
@@ -8,10 +9,17 @@ Write a technical blog post in Markdown based on the following sources:
 Requirements:
   - Begin with a machine-readable TAGS line listing 3–6 comma-separated, lowercase,
     hyphenated tags relevant to the post (e.g. TAGS: haskell, functional-programming, type-system)
-  - Follow immediately with a single Markdown H1 line as the post title
-  - Draw clear, concrete parallels between C#/.NET and Haskell concepts
-  - Include at least one practical code example (Haskell, with a C# comparison if helpful)
-  - Length: 600–900 words (excluding the TAGS line)
-  - End with a '## Further Reading' section that links to each source
+  - Follow immediately with a single Markdown H1 line as the post title (maximum 100 characters)
+  - Begin the body immediately after the title — no greetings, no preamble, no "In this post we
+    will...". Open with the first substantive sentence of the topic itself
+  - The post may be a pure Haskell topic (e.g. type-class design, STM, monads, GADTs, effect
+    systems, profiling) or a comparative topic between Haskell and another language/ecosystem;
+    choose whichever framing best serves the subject matter
+  - When a C#/.NET comparison genuinely illuminates the concept, include it; otherwise omit it
+  - Include multiple practical code examples with real-world context; annotate non-obvious idioms
+  - Aim for depth: cover edge cases, common pitfalls, and engineering trade-offs
+  - Length: 1500–2000 words (excluding the TAGS line)
+  - End with a '## Further Reading' section; list each source as a bullet using the format
+    `- [Source title](url)` — the link text must be the human-readable title, never the raw URL
 
 Output ONLY the Markdown post (TAGS line first, then the H1 title and content).

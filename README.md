@@ -164,7 +164,7 @@ All configuration is read from environment variables. See `.env.example` for the
 | `DISCORD_GUILD_ID` | ✅ | — | Server (guild) ID |
 | `DISCORD_CHANNEL_ID` | ✅ | — | Forum channel ID for review threads |
 | `DISCOVERY_INTERVAL_SECS` | | `86400` | How often to discover new content (seconds) |
-| `DRAFT_INTERVAL_SECS` | | `3600` | How often to generate a new draft (seconds) |
+| `DRAFT_INTERVAL_SECS` | | `43200` | How often to generate a new draft (seconds) |
 
 ## Running the tests
 

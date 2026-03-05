@@ -43,7 +43,6 @@ RawContent
   title           Text
   url             Text
   summary         Text
-  rawHtml         Text Maybe
   subjectId       SubjectId Maybe
   status          ContentStatus
   rejectionReason Text Maybe

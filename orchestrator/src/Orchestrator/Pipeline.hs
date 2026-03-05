@@ -156,8 +156,8 @@ mkReviewRequest env rcKey postDraftKey createdAt draft =
       rrRevise = revise,
       rrApprove = publishDraft env rcKey postDraftKey createdAt,
       rrReject = rejectDraft env rcKey postDraftKey,
-      rrOnUserMessage = \msg -> insertComment env postDraftKey CommentAuthorUser msg,
-      rrOnBotMessage = \msg -> insertComment env postDraftKey CommentAuthorJarvis (truncateText 500 msg),
+      rrOnUserMessage = insertComment env postDraftKey CommentAuthorUser,
+      rrOnBotMessage = insertComment env postDraftKey CommentAuthorJarvis . truncateText 500,
       rrOnThreadCreated = recordThreadCreated env postDraftKey
     }
   where

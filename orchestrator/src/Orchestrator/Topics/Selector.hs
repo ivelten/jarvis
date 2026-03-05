@@ -55,7 +55,6 @@ ingestContent discovered = do
           { rawContentTitle = dcTitle dc,
             rawContentUrl = dcUrl dc,
             rawContentSummary = dcSummary dc,
-            rawContentRawHtml = Nothing,
             rawContentSubjectId = mSubject,
             rawContentStatus = ContentNew,
             rawContentRejectionReason = Nothing,

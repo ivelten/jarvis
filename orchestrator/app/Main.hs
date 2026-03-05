@@ -48,7 +48,7 @@ data Config = Config
     cfgDcChannelId :: !Int,
     -- | How often to run the discovery step, in seconds (default: 86400 = 1 day).
     cfgDiscoveryIntervalSecs :: !Int,
-    -- | How often to run the draft-generation step, in seconds (default: 3600 = 1 hour).
+    -- | How often to run the draft-generation step, in seconds (default: 43200 = 12 hours).
     cfgDraftIntervalSecs :: !Int
   }
 
@@ -68,7 +68,7 @@ instance FromEnv Config where
       <*> env "DISCORD_GUILD_ID"
       <*> env "DISCORD_CHANNEL_ID"
       <*> (fromMaybe 86400 <$> envMaybe "DISCOVERY_INTERVAL_SECS")
-      <*> (fromMaybe 3600 <$> envMaybe "DRAFT_INTERVAL_SECS")
+      <*> (fromMaybe 43200 <$> envMaybe "DRAFT_INTERVAL_SECS")
 
 -- ---------------------------------------------------------------------------
 -- Utilities
