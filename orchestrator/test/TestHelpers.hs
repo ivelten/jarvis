@@ -83,6 +83,6 @@ truncateTestTables :: DbPool -> IO ()
 truncateTestTables pool =
   runDb pool $
     rawExecute
-      "TRUNCATE ai_analysis, review_comment, post_draft_source, \
-      \post_draft, raw_content, subject RESTART IDENTITY CASCADE"
+      "TRUNCATE ai_analysis, review_comment, post_draft_subject, post_draft_source, \
+      \post_draft, raw_content_subject, raw_content, subject RESTART IDENTITY CASCADE"
       []

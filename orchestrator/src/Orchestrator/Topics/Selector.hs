@@ -6,11 +6,13 @@ module Orchestrator.Topics.Selector
 where
 
 import Control.Monad.IO.Class (liftIO)
+import Data.Maybe (catMaybes)
 import Data.Time (getCurrentTime)
 import Database.Persist.Sql
   ( Entity (..),
     SqlPersistT,
     getBy,
+    insertUnique,
     selectList,
     upsertBy,
     (=.),
@@ -29,38 +31,44 @@ ingestDiscoveredContent aiCfg = do
 -- | Persist a list of already-discovered content items (upsert by URL).
 -- Triage fields (@status@, @rejectionReason@) are never overwritten on
 -- conflict, so human decisions are preserved.
+-- Subject associations are additive on re-ingest: new links are inserted but
+-- existing associations are never removed.
 -- This is separated from 'ingestDiscoveredContent' to allow testing without
 -- a real AI call.
 ingestContent :: [DiscoveredContent] -> SqlPersistT IO ()
-ingestContent discovered = do
-  now <- liftIO getCurrentTime
-  rows <- mapM (toRawContent now) discovered
-  mapM_ upsertRow rows
+ingestContent = mapM_ ingestOne
   where
-    upsertRow rc =
-      upsertBy
-        (UniqueContentUrl (rawContentUrl rc))
-        rc
-        [ RawContentTitle =. rawContentTitle rc,
-          RawContentSummary =. rawContentSummary rc,
-          RawContentSubjectId =. rawContentSubjectId rc,
-          RawContentUpdatedAt =. rawContentUpdatedAt rc
-        ]
-    toRawContent now dc = do
-      mSubject <- case dcSubject dc of
-        Nothing -> pure Nothing
-        Just name -> fmap entityKey <$> getBy (UniqueSubjectName name)
-      pure
-        RawContent
-          { rawContentTitle = dcTitle dc,
-            rawContentUrl = dcUrl dc,
-            rawContentSummary = dcSummary dc,
-            rawContentSubjectId = mSubject,
-            rawContentStatus = ContentNew,
-            rawContentRejectionReason = Nothing,
-            rawContentCreatedAt = now,
-            rawContentUpdatedAt = now
-          }
+    ingestOne dc = do
+      now <- liftIO getCurrentTime
+      rcEntity <-
+        upsertBy
+          (UniqueContentUrl (dcUrl dc))
+          RawContent
+            { rawContentTitle = dcTitle dc,
+              rawContentUrl = dcUrl dc,
+              rawContentSummary = dcSummary dc,
+              rawContentStatus = ContentNew,
+              rawContentRejectionReason = Nothing,
+              rawContentCreatedAt = now,
+              rawContentUpdatedAt = now
+            }
+          [ RawContentTitle =. dcTitle dc,
+            RawContentSummary =. dcSummary dc,
+            RawContentUpdatedAt =. now
+          ]
+      linkSubjects (entityKey rcEntity) (dcSubjects dc)
+
+    linkSubjects rcKey names = do
+      subjectKeys <- catMaybes <$> mapM lookupSubject names
+      mapM_ (insertUnique . mkLink rcKey) subjectKeys
+
+    mkLink rcKey sid =
+      RawContentSubject
+        { rawContentSubjectRawContentId = rcKey,
+          rawContentSubjectSubjectId = sid
+        }
+
+    lookupSubject name = fmap entityKey <$> getBy (UniqueSubjectName name)
 
 -- | Return all content items that have not yet been triaged.
 pendingContent :: SqlPersistT IO [Entity RawContent]

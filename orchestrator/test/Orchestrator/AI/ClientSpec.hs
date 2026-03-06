@@ -76,13 +76,13 @@ spec = do
 
   describe "DiscoveredContent JSON" $ do
     it "round-trips via encode/decode" $ do
-      let dc = DiscoveredContent "Title" "https://example.com" "A summary" (Just "Haskell")
+      let dc = DiscoveredContent "Title" "https://example.com" "A summary" ["Haskell", "Types & Typeclasses"]
       decode (encode dc) `shouldBe` Just dc
 
-    it "decodes without the optional 'subject' field" $ do
+    it "decodes without the optional 'subjects' field" $ do
       let json = "{\"title\":\"T\",\"url\":\"https://x\",\"summary\":\"S\"}"
       (decode json :: Maybe DiscoveredContent)
-        `shouldBe` Just (DiscoveredContent "T" "https://x" "S" Nothing)
+        `shouldBe` Just (DiscoveredContent "T" "https://x" "S" [])
 
     it "fails to decode when required fields are missing" $ do
       let json = "{\"title\":\"T\"}"

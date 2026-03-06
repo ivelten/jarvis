@@ -32,7 +32,7 @@ spec = do
     it "creates all expected tables" $ do
       tables <- getPublicTables pool
       tables
-        `shouldContain` ["ai_analysis", "post_draft", "post_draft_source", "raw_content", "review_comment", "subject"]
+        `shouldContain` ["ai_analysis", "post_draft", "post_draft_source", "post_draft_subject", "raw_content", "raw_content_subject", "review_comment", "subject"]
 
     it "creates the content_status enum type" $ do
       types <- getPgEnumTypes pool
@@ -78,8 +78,10 @@ spec = do
       indexes `shouldContain` ["idx_ai_analysis_draft_id"]
       indexes `shouldContain` ["idx_post_draft_source_content_id"]
       indexes `shouldContain` ["idx_post_draft_source_draft_id"]
-      indexes `shouldContain` ["idx_post_draft_subject_id"]
-      indexes `shouldContain` ["idx_raw_content_subject_id"]
+      indexes `shouldContain` ["idx_raw_content_subject_raw_content_id"]
+      indexes `shouldContain` ["idx_raw_content_subject_subject_id"]
+      indexes `shouldContain` ["idx_post_draft_subject_post_draft_id"]
+      indexes `shouldContain` ["idx_post_draft_subject_subject_id"]
       indexes `shouldContain` ["idx_review_comment_draft_id"]
 
     it "creates partial unique index on post_draft.discord_thread_id" $ do
@@ -144,7 +146,6 @@ spec = do
                 { rawContentTitle = "Source article",
                   rawContentUrl = "https://example.com/source",
                   rawContentSummary = "Summary.",
-                  rawContentSubjectId = Nothing,
                   rawContentStatus = ContentNew,
                   rawContentRejectionReason = Nothing,
                   rawContentCreatedAt = now,
@@ -156,7 +157,6 @@ spec = do
               PostDraft
                 { postDraftTitle = "Draft",
                   postDraftGitBranch = "draft/fk-test",
-                  postDraftSubjectId = Nothing,
                   postDraftSuggestedTags = TagList [],
                   postDraftStatus = DraftReviewing,
                   postDraftDiscordThreadId = Nothing,
@@ -250,7 +250,6 @@ roundTripStatus pool status = do
           { rawContentTitle = "Test article",
             rawContentUrl = url,
             rawContentSummary = "A test summary.",
-            rawContentSubjectId = Nothing,
             rawContentStatus = status,
             rawContentRejectionReason = Nothing,
             rawContentCreatedAt = now,
@@ -271,7 +270,6 @@ roundTripDraftStatus pool status = do
         PostDraft
           { postDraftTitle = "Test draft",
             postDraftGitBranch = branch,
-            postDraftSubjectId = Nothing,
             postDraftSuggestedTags = TagList [],
             postDraftStatus = status,
             postDraftDiscordThreadId = Nothing,
@@ -297,7 +295,6 @@ roundTripCommentAuthor pool author = do
         PostDraft
           { postDraftTitle = "Parent draft",
             postDraftGitBranch = "draft/comment-author-" <> pack (show author),
-            postDraftSubjectId = Nothing,
             postDraftSuggestedTags = TagList [],
             postDraftStatus = DraftReviewing,
             postDraftDiscordThreadId = Nothing,
@@ -330,7 +327,6 @@ roundTripTagList pool branch tags = do
         PostDraft
           { postDraftTitle = "Tag test draft",
             postDraftGitBranch = branch,
-            postDraftSubjectId = Nothing,
             postDraftSuggestedTags = tags,
             postDraftStatus = DraftReviewing,
             postDraftDiscordThreadId = Nothing,

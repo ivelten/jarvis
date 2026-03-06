@@ -43,7 +43,6 @@ RawContent
   title           Text
   url             Text
   summary         Text
-  subjectId       SubjectId Maybe
   status          ContentStatus
   rejectionReason Text Maybe
   createdAt       UTCTime
@@ -51,11 +50,17 @@ RawContent
   UniqueContentUrl url
   deriving Show Eq
 
+-- | Join table: a RawContent item may belong to many subjects.
+RawContentSubject
+  rawContentId RawContentId
+  subjectId    SubjectId
+  UniqueRawContentSubject rawContentId subjectId
+  deriving Show Eq
+
 -- | A blog post draft generated from one or more RawContent items.
 PostDraft
   title            Text
   gitBranch        Text
-  subjectId        SubjectId Maybe
   suggestedTags    TagList
   status           DraftStatus
   discordThreadId  Text Maybe
@@ -73,6 +78,13 @@ PostDraftSource
   postDraftId   PostDraftId
   rawContentId  RawContentId
   UniquePostDraftSource postDraftId rawContentId
+  deriving Show Eq
+
+-- | Join table: a PostDraft may cover many subjects.
+PostDraftSubject
+  postDraftId PostDraftId
+  subjectId   SubjectId
+  UniquePostDraftSubject postDraftId subjectId
   deriving Show Eq
 
 -- | A message in the Discord review forum thread for a PostDraft.

@@ -6,7 +6,7 @@ module Orchestrator.Topics.SelectorSpec (spec) where
 
 import Data.Text (Text)
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
-import Database.Persist.Sql (Entity (..), entityVal, insert_, update, (=.))
+import Database.Persist.Sql (Entity (..), entityKey, entityVal, insert_, selectList, update, (=.), (==.))
 import Orchestrator.AI.Client (DiscoveredContent (..))
 import Orchestrator.Database.Connection (runDb)
 import Orchestrator.Database.Entities
@@ -77,19 +77,20 @@ spec = do
         pending' <- runDb pool pendingContent
         pending' `shouldBe` []
 
-      it "inserts with subjectId = Nothing when subject name is unknown" $ do
+      it "does not create a subject link when subject name is unknown" $ do
         runDb pool $
           ingestContent
             [ DiscoveredContent
                 { dcTitle = "No subject",
                   dcUrl = "https://nosubject.com",
                   dcSummary = "Some summary",
-                  dcSubject = Just "NonExistentSubject"
+                  dcSubjects = ["NonExistentSubject"]
                 }
             ]
         result <- runDb pool pendingContent
         length result `shouldBe` 1
-        rawContentSubjectId (entityVal (head result)) `shouldBe` Nothing
+        links <- runDb pool $ selectList [RawContentSubjectRawContentId ==. entityKey (head result)] []
+        links `shouldBe` ([] :: [Entity RawContentSubject])
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -104,7 +105,6 @@ rawContent url status =
     { rawContentTitle = "Test title",
       rawContentUrl = url,
       rawContentSummary = "Test summary",
-      rawContentSubjectId = Nothing,
       rawContentStatus = status,
       rawContentRejectionReason = Nothing,
       rawContentCreatedAt = epoch,
@@ -117,5 +117,5 @@ discovered url title =
     { dcTitle = title,
       dcUrl = url,
       dcSummary = "Some summary",
-      dcSubject = Nothing
+      dcSubjects = []
     }

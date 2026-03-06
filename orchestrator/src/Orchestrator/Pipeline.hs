@@ -18,7 +18,7 @@ import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, getCurrentTime)
-import Database.Persist (entityKey, entityVal, insert, insert_, update, (=.))
+import Database.Persist (entityKey, entityVal, insert, insert_, selectList, update, (=.), (==.))
 import Orchestrator.AI.Client
   ( AiConfig,
     DiscoveredContent (..),
@@ -85,7 +85,7 @@ processDraft env@PipelineEnv {..} rcKey rc = do
   draft <- generateDraft pipeAiCfg [rcToDiscovered rc]
   now <- getCurrentTime
   markAsDrafted env rcKey now
-  postDraftKey <- persistInitialDraft env rcKey rc draft now
+  postDraftKey <- persistInitialDraft env rcKey draft now
   putStrLn "[Drafts] Draft sent to Discord for review."
   rr <- mkReviewRequest env rcKey postDraftKey now draft
   registerForReview pipeDcCfg rr
@@ -106,18 +106,16 @@ markAsDrafted PipelineEnv {..} rcKey now =
 persistInitialDraft ::
   PipelineEnv ->
   Key RawContent ->
-  RawContent ->
   GeneratedDraft ->
   UTCTime ->
   IO (Key PostDraft)
-persistInitialDraft PipelineEnv {..} rcKey rc draft now =
+persistInitialDraft PipelineEnv {..} rcKey draft now =
   runDb pipeDbPool $ do
     pdKey <-
       insert
         PostDraft
           { postDraftTitle = gdTitle draft,
             postDraftGitBranch = gdBranch draft,
-            postDraftSubjectId = rawContentSubjectId rc,
             postDraftSuggestedTags = TagList (gdTags draft),
             postDraftStatus = DraftReviewing,
             postDraftDiscordThreadId = Nothing,
@@ -128,6 +126,17 @@ persistInitialDraft PipelineEnv {..} rcKey rc draft now =
             postDraftCreatedAt = now,
             postDraftUpdatedAt = now
           }
+    -- Copy subject associations from the source content item.
+    rcSubjects <- selectList [RawContentSubjectRawContentId ==. rcKey] []
+    mapM_
+      ( \e ->
+          insert_
+            PostDraftSubject
+              { postDraftSubjectPostDraftId = pdKey,
+                postDraftSubjectSubjectId = rawContentSubjectSubjectId (entityVal e)
+              }
+      )
+      rcSubjects
     insert_
       PostDraftSource
         { postDraftSourcePostDraftId = pdKey,
@@ -326,5 +335,5 @@ rcToDiscovered rc =
     { dcTitle = rawContentTitle rc,
       dcUrl = rawContentUrl rc,
       dcSummary = rawContentSummary rc,
-      dcSubject = Nothing
+      dcSubjects = []
     }
