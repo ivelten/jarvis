@@ -18,6 +18,7 @@ extra-source-files:
   prompts/*.txt
   sql/constraints/*.sql
   sql/indexes/*.sql
+  sql/seeds/*.sql
   sql/triggers/*.sql
   sql/types/*.sql
 

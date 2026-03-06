@@ -1,17 +1,11 @@
 Search the web for recent, high-quality articles, blog posts, and GitHub
-repositories relevant to these topics:
-  - Haskell in production / real-world Haskell
-  - Functional programming patterns for developers coming from C#/.NET
-  - Type-driven design and type-level programming in Haskell
-  - Practical Haskell libraries (servant, persistent, optics, async, etc.)
-  - Paradigm comparisons between OOP/imperative and functional styles
-
+repositories relevant to these subjects:
+{{SUBJECTS}}
 Return a JSON array. Each element must be an object with these fields:
   title   – article or repo title (string, required)
   url     – URL to the article or repository (string, required)
   summary – 1–2 sentences on why this is relevant (string, required)
-  subjects – list of zero or more from: "Haskell Basics", "Types & Typeclasses", "Monads",
-             "Error Handling", "Performance", "Tooling", "Real World"
+  subjects – list of zero or more subject names from: {{SUBJECT_NAMES}}
              (array of strings, optional — omit the field or use [] if none apply)
 
 Return ONLY the JSON array with no additional prose.

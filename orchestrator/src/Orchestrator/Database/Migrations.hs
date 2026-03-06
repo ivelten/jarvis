@@ -5,6 +5,7 @@ module Orchestrator.Database.Migrations
     createConstraints,
     createTriggers,
     createIndexes,
+    seedSubjects,
   )
 where
 
@@ -51,3 +52,11 @@ createIndexes = do
   $(executeSqlFile "sql/indexes/post_draft_source.sql")
   $(executeSqlFile "sql/indexes/review_comment.sql")
   $(executeSqlFile "sql/indexes/ai_analysis.sql")
+
+-- | Insert the default blog subjects when the database is first set up.
+--
+-- Uses @ON CONFLICT (name) DO NOTHING@, so it is safe to call on every
+-- startup — existing subjects and any manual edits are never overwritten.
+seedSubjects :: SqlPersistT IO ()
+seedSubjects =
+  $(executeSqlFile "sql/seeds/subjects.sql")

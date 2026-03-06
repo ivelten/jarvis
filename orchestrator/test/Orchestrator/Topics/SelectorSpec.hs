@@ -4,7 +4,7 @@
 -- handled automatically by the top-level test 'Main'.
 module Orchestrator.Topics.SelectorSpec (spec) where
 
-import Data.Text (Text)
+import Data.Text (Text, unpack)
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 import Database.Persist.Sql (Entity (..), entityKey, entityVal, insert_, selectList, update, (=.), (==.))
 import Orchestrator.AI.Client (DiscoveredContent (..))
@@ -91,6 +91,64 @@ spec = do
         length result `shouldBe` 1
         links <- runDb pool $ selectList [RawContentSubjectRawContentId ==. entityKey (head result)] []
         links `shouldBe` ([] :: [Entity RawContentSubject])
+
+      it "links content to an existing subject by name" $ do
+        let score = either (error . unpack) id (mkInterestScore 3)
+        runDb pool $
+          insert_
+            Subject
+              { subjectName = "Haskell Basics",
+                subjectDescription = Nothing,
+                subjectInterestScore = score,
+                subjectCreatedAt = epoch,
+                subjectUpdatedAt = epoch
+              }
+        runDb pool $
+          ingestContent
+            [ DiscoveredContent
+                { dcTitle = "A Haskell Basics article",
+                  dcUrl = "https://linked-subject.com",
+                  dcSummary = "About basics",
+                  dcSubjects = ["Haskell Basics"]
+                }
+            ]
+        result <- runDb pool pendingContent
+        length result `shouldBe` 1
+        links <- runDb pool $ selectList [RawContentSubjectRawContentId ==. entityKey (head result)] []
+        length links `shouldBe` 1
+
+      it "links content to multiple subjects when several names match" $ do
+        let score = either (error . unpack) id (mkInterestScore 3)
+        runDb pool $ do
+          insert_
+            Subject
+              { subjectName = "Monads",
+                subjectDescription = Nothing,
+                subjectInterestScore = score,
+                subjectCreatedAt = epoch,
+                subjectUpdatedAt = epoch
+              }
+          insert_
+            Subject
+              { subjectName = "Error Handling",
+                subjectDescription = Nothing,
+                subjectInterestScore = score,
+                subjectCreatedAt = epoch,
+                subjectUpdatedAt = epoch
+              }
+        runDb pool $
+          ingestContent
+            [ DiscoveredContent
+                { dcTitle = "Monadic error handling",
+                  dcUrl = "https://multi-subject.com",
+                  dcSummary = "About both",
+                  dcSubjects = ["Monads", "Error Handling"]
+                }
+            ]
+        result <- runDb pool pendingContent
+        length result `shouldBe` 1
+        links <- runDb pool $ selectList [RawContentSubjectRawContentId ==. entityKey (head result)] []
+        length links `shouldBe` 2
 
 -- ---------------------------------------------------------------------------
 -- Helpers

@@ -8,8 +8,8 @@ module Orchestrator.Database.MigrationSpec (spec) where
 
 import Data.Text (Text, pack)
 import Data.Time (getCurrentTime)
-import Database.Persist (get, insert)
-import Database.Persist.Sql (Single (..), rawSql)
+import Database.Persist (SelectOpt, entityVal, get, insert)
+import Database.Persist.Sql (Single (..), rawSql, selectList)
 import Orchestrator.Database.Connection (DbPool, migrateDatabase, runDb)
 import Orchestrator.Database.Entities
 import Orchestrator.Database.Models
@@ -87,6 +87,22 @@ spec = do
     it "creates partial unique index on post_draft.discord_thread_id" $ do
       indexes <- getPgIndexes pool
       indexes `shouldContain` ["idx_post_draft_discord_thread_id"]
+
+  describe "default subject seed" $ do
+    it "inserts all five default subjects" $ do
+      subjects <- runDb pool $ selectList [] ([] :: [SelectOpt Subject])
+      map (subjectName . entityVal) subjects
+        `shouldMatchList` [ "Haskell in production / real-world Haskell",
+                            "Functional programming patterns for developers coming from C#/.NET",
+                            "Type-driven design and type-level programming in Haskell",
+                            "Practical Haskell libraries (servant, persistent, optics, async, etc.)",
+                            "Paradigm comparisons between OOP/imperative and functional styles"
+                          ]
+
+    it "seed is idempotent (no duplicates after re-running migrateDatabase)" $ do
+      migrateDatabase pool
+      subjects <- runDb pool $ selectList [] ([] :: [SelectOpt Subject])
+      length subjects `shouldBe` 5
 
   describe "ContentStatus persistence" $
     before_ (truncateTestTables pool) $ do

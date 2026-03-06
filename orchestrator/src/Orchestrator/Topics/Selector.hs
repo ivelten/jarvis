@@ -23,9 +23,13 @@ import Orchestrator.Database.Entities
 import Orchestrator.Database.Models
 
 -- | Ask the AI to search the web and persist any newly discovered content.
+-- Subject names are read from the database at call time, so the discovery
+-- search scope always matches what is in the Subject table.
 ingestDiscoveredContent :: AiConfig -> SqlPersistT IO ()
 ingestDiscoveredContent aiCfg = do
-  discovered <- liftIO $ discoverContent aiCfg
+  subjects <- selectList [] []
+  let names = map (subjectName . entityVal) (subjects :: [Entity Subject])
+  discovered <- liftIO $ discoverContent aiCfg names
   ingestContent discovered
 
 -- | Persist a list of already-discovered content items (upsert by URL).

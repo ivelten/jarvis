@@ -386,17 +386,26 @@ checkUrl mgr url = do
 -- | Ask Gemini (with Google Search grounding) to discover recent, relevant
 --   content and return it as a structured list.
 --
+-- The @subjects@ list is read from the database by the caller and substituted
+-- into the prompt template at runtime, so the search scope always reflects
+-- what is in the Subject table rather than being hardcoded.
+--
 -- The model provides redirect URLs for each item.  These are followed
 -- immediately (while still valid) via 'followRedirect' to obtain the real,
 -- permanent source URLs.  The HTML body of each resolved URL is then fetched
 -- generator.
-discoverContent :: AiConfig -> IO [DiscoveredContent]
-discoverContent cfg = do
+discoverContent :: AiConfig -> [Text] -> IO [DiscoveredContent]
+discoverContent cfg subjects = do
   (txt, _) <- callGemini cfg requestBody'
   items <- decodeText (stripFences txt) :: IO [DiscoveredContent]
   results <- mapM (resolveItem (aiManager cfg)) items
   pure (catMaybes results)
   where
+    bullets = T.unlines ["  - " <> s | s <- subjects]
+    names = T.intercalate ", " (map (\s -> "\"" <> s <> "\"") subjects)
+    prompt =
+      T.replace "{{SUBJECTS}}" bullets $
+        T.replace "{{SUBJECT_NAMES}}" names discoverPrompt
     resolveItem mgr dc = do
       realUrl <- followRedirect mgr (dcUrl dc)
       -- Discard items whose URL is still on the vertexaisearch proxy domain
@@ -410,7 +419,7 @@ discoverContent cfg = do
     -- JSON mode; the prompt instructs the model to return JSON directly.
     requestBody' =
       object
-        [ "contents" .= [userContents discoverPrompt],
+        [ "contents" .= [userContents prompt],
           "tools" .= [object ["google_search" .= object []]]
         ]
 

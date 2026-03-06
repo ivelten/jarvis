@@ -18,7 +18,7 @@ import Database.Persist.Postgresql
 import qualified Database.Persist.Postgresql as PG
 import Database.Persist.Sql (SqlPersistT)
 import Orchestrator.Database.Entities (migrateAll)
-import Orchestrator.Database.Migrations (createConstraints, createEnumTypes, createIndexes, createTriggers)
+import Orchestrator.Database.Migrations (createConstraints, createEnumTypes, createIndexes, createTriggers, seedSubjects)
 
 -- ---------------------------------------------------------------------------
 -- Types
@@ -58,3 +58,4 @@ migrateDatabase pool = runDb pool $ do
   createConstraints
   createTriggers
   createIndexes
+  seedSubjects
