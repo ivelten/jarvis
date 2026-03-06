@@ -47,27 +47,40 @@ chunkText maxLen = filter (not . T.null) . map T.strip . go
     go t
       | T.length t <= maxLen = [t]
       | otherwise =
-          let window = T.take maxLen t
-              remaining = T.drop maxLen t
-              (chunk, leftover) = bestSplit window
-           in case currentFenceOpener chunk of
-                Nothing ->
-                  chunk : go (leftover <> remaining)
-                Just opener ->
-                  let opLen = T.length opener + 1 -- opener + '\n'
-                   in if opLen >= T.length chunk
-                        then
-                          let (altChunk, altLeft) =
-                                bestSplitWithMinPrefix opLen (chunk <> leftover)
-                           in case currentFenceOpener altChunk of
-                                Nothing ->
-                                  altChunk : go (altLeft <> remaining)
-                                Just ro ->
-                                  if T.length ro + 1 >= T.length altChunk
-                                    then altChunk : go (altLeft <> remaining)
-                                    else (altChunk <> "\n```") : go (ro <> "\n" <> altLeft <> remaining)
-                        else
-                          (chunk <> "\n```") : go (opener <> "\n" <> leftover <> remaining)
+          let (next, rest) = splitNext t
+           in next : go rest
+
+    -- \| Extract the next emittable chunk and the remaining text to process.
+    splitNext t =
+      let (chunk, leftover) = bestSplit (T.take maxLen t)
+          overflow = T.drop maxLen t
+       in applyFence chunk leftover overflow
+
+    -- \| Wrap the chunk with fence continuity if it ends inside an open fence.
+    applyFence chunk leftover overflow =
+      case currentFenceOpener chunk of
+        Nothing -> (chunk, leftover <> overflow)
+        Just opener -> sealFence opener chunk leftover overflow
+
+    -- \| The chunk ends inside an open fence.  If no real content follows the
+    -- opener within the window, force a deeper split; otherwise close the
+    -- fence here and reopen it in the next chunk.
+    sealFence opener chunk leftover overflow
+      | T.length opener + 1 >= T.length chunk =
+          let (c, l) = bestSplitWithMinPrefix (T.length opener + 1) (chunk <> leftover)
+           in recoverBareOpener c l overflow
+      | otherwise =
+          (chunk <> "\n```", opener <> "\n" <> leftover <> overflow)
+
+    -- \| After a forced deeper split, check once more.  If the result is still
+    -- a bare opener emit it unchanged (last resort to avoid infinite recursion);
+    -- otherwise close the fence and continue normally.
+    recoverBareOpener chunk leftover overflow =
+      case currentFenceOpener chunk of
+        Nothing -> (chunk, leftover <> overflow)
+        Just ro
+          | T.length ro + 1 >= T.length chunk -> (chunk, leftover <> overflow)
+          | otherwise -> (chunk <> "\n```", ro <> "\n" <> leftover <> overflow)
 
     -- \| Like 'bestSplit' but treats the first @minPfx@ characters of the
     -- window as a fixed prefix — the split is only searched for in the
