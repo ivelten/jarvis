@@ -4,7 +4,7 @@
 -- handled automatically by the top-level test 'Main'.
 module Orchestrator.Topics.SelectorSpec (spec) where
 
-import Data.Text (Text, unpack)
+import Data.Text (Text, pack, unpack)
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 import Database.Persist.Sql (Entity (..), Filter, entityKey, entityVal, insert_, selectList, update, (=.), (==.))
 import Orchestrator.AI.Client (DiscoveredContent (..))
@@ -146,6 +146,33 @@ spec = do
         length result `shouldBe` 1
         links <- runDb pool $ selectList [RawContentSubjectRawContentId ==. entityKey (head result)] []
         length links `shouldBe` 2
+
+    describe "topSubjects" $ do
+      it "returns subjects ordered by interest score descending" $ do
+        let mkScore n = either (error . unpack) id (mkInterestScore n)
+        runDb pool $ do
+          insert_ Subject {subjectName = "Low", subjectInterestScore = mkScore 1, subjectCreatedAt = epoch, subjectUpdatedAt = epoch}
+          insert_ Subject {subjectName = "High", subjectInterestScore = mkScore 5, subjectCreatedAt = epoch, subjectUpdatedAt = epoch}
+          insert_ Subject {subjectName = "Mid", subjectInterestScore = mkScore 3, subjectCreatedAt = epoch, subjectUpdatedAt = epoch}
+        results <- runDb pool topSubjects
+        map (subjectName . entityVal) results `shouldBe` ["High", "Mid", "Low"]
+
+      it "returns at most 10 subjects even when more exist" $ do
+        let mkScore n = either (error . unpack) id (mkInterestScore n)
+        runDb pool $
+          mapM_
+            ( \i ->
+                insert_
+                  Subject
+                    { subjectName = "Subject " <> pack (show (i :: Int)),
+                      subjectInterestScore = mkScore (((i - 1) `mod` 5) + 1),
+                      subjectCreatedAt = epoch,
+                      subjectUpdatedAt = epoch
+                    }
+            )
+            [1 .. 12]
+        results <- runDb pool topSubjects
+        length results `shouldBe` 10
 
     describe "recordDiscovery" $ do
       it "inserts a ContentSearchAiAnalysis row recording the item count" $ do

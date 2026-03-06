@@ -2,6 +2,7 @@ module Orchestrator.Topics.Selector
   ( ingestDiscoveredContent,
     ingestContent,
     recordDiscovery,
+    topSubjects,
     pendingContent,
   )
 where
@@ -11,6 +12,7 @@ import Data.Maybe (catMaybes)
 import Data.Time (getCurrentTime)
 import Database.Persist.Sql
   ( Entity (..),
+    SelectOpt (..),
     SqlPersistT,
     getBy,
     insertUnique,
@@ -25,14 +27,20 @@ import Orchestrator.Database.Entities
 import Orchestrator.Database.Models
 
 -- | Ask the AI to search the web and persist any newly discovered content.
--- Subject names are read from the database at call time, so the discovery
--- search scope always matches what is in the Subject table.
+-- Subjects are read from the database at call time, sorted by interest score
+-- descending, capped at the top 10, so higher-priority subjects always get
+-- included in the discovery prompt.
 ingestDiscoveredContent :: AiConfig -> SqlPersistT IO ()
 ingestDiscoveredContent aiCfg = do
-  subjects <- selectList [] []
-  let names = map (subjectName . entityVal) (subjects :: [Entity Subject])
+  subjects <- topSubjects
+  let names = map (subjectName . entityVal) subjects
   (tokensUsed, discovered) <- liftIO $ discoverContent aiCfg names
   recordDiscovery tokensUsed discovered
+
+-- | Return up to 10 subjects ordered by interest score descending.
+-- This is the set passed to the AI discovery prompt on each run.
+topSubjects :: SqlPersistT IO [Entity Subject]
+topSubjects = selectList [] [Desc SubjectInterestScore, LimitTo 10]
 
 -- | Persist a list of discovered content items and record a 'ContentSearchAiAnalysis'
 -- telemetry row.  Separated from 'ingestDiscoveredContent' so it can be tested
