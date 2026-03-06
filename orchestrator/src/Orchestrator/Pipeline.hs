@@ -10,6 +10,7 @@ module Orchestrator.Pipeline
   ( PipelineEnv (..),
     runDiscovery,
     runDraftGeneration,
+    persistDraftAnalysis,
   )
 where
 
@@ -19,6 +20,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, getCurrentTime)
 import Database.Persist (entityKey, entityVal, insert, insert_, selectList, update, (=.), (==.))
+import Database.Persist.Sql (SqlPersistT)
 import Orchestrator.AI.Client
   ( AiConfig,
     DiscoveredContent (..),
@@ -101,7 +103,7 @@ markAsDrafted PipelineEnv {..} rcKey now =
         RawContentUpdatedAt =. now
       ]
 
--- | Insert the initial 'PostDraft', 'PostDraftSource', and 'AiAnalysis' rows.
+-- | Insert the initial 'PostDraft', 'PostDraftSource', and 'DraftAiAnalysis' rows.
 -- Returns the new 'PostDraft' key.
 persistInitialDraft ::
   PipelineEnv ->
@@ -142,13 +144,7 @@ persistInitialDraft PipelineEnv {..} rcKey draft now =
         { postDraftSourcePostDraftId = pdKey,
           postDraftSourceRawContentId = rcKey
         }
-    insert_
-      AiAnalysis
-        { aiAnalysisPostDraftId = pdKey,
-          aiAnalysisSummary = truncateText 500 (gdBodyEn draft),
-          aiAnalysisTokensUsed = gdTokensUsed draft,
-          aiAnalysisAnalyzedAt = now
-        }
+    persistDraftAnalysis pdKey draft now
     pure pdKey
 
 -- | Build the 'ReviewRequest' record that wires the bot callbacks back into
@@ -188,7 +184,7 @@ mkReviewRequest env rcKey postDraftKey createdAt draft = do
       finalBodyPtBr <- readIORef ptBrRef
       publishDraft env rcKey postDraftKey createdAt finalBodyEn finalBodyPtBr tags
 
--- | Insert an 'AiAnalysis' row for a revision step and update the stored bodies.
+-- | Insert a 'DraftAiAnalysis' row for a revision step and update the stored bodies.
 recordRevision :: PipelineEnv -> Key PostDraft -> GeneratedDraft -> IO ()
 recordRevision PipelineEnv {..} postDraftKey draft = do
   revisedAt <- getCurrentTime
@@ -199,13 +195,19 @@ recordRevision PipelineEnv {..} postDraftKey draft = do
         PostDraftContentMarkdownPtBr =. Just (gdBodyPtBr draft),
         PostDraftUpdatedAt =. revisedAt
       ]
-    insert_
-      AiAnalysis
-        { aiAnalysisPostDraftId = postDraftKey,
-          aiAnalysisSummary = truncateText 500 (gdBodyEn draft),
-          aiAnalysisTokensUsed = gdTokensUsed draft,
-          aiAnalysisAnalyzedAt = revisedAt
-        }
+    persistDraftAnalysis postDraftKey draft revisedAt
+
+-- | Insert a single 'DraftAiAnalysis' telemetry row for a draft or revision.
+-- Exported so it can be tested without going through the full pipeline.
+persistDraftAnalysis :: Key PostDraft -> GeneratedDraft -> UTCTime -> SqlPersistT IO ()
+persistDraftAnalysis pdKey draft analyzedAt =
+  insert_
+    DraftAiAnalysis
+      { draftAiAnalysisPostDraftId = pdKey,
+        draftAiAnalysisSummary = truncateText 500 (gdBodyEn draft),
+        draftAiAnalysisTokensUsed = gdTokensUsed draft,
+        draftAiAnalysisAnalyzedAt = analyzedAt
+      }
 
 -- | Persist the Discord thread ID once the forum thread has been created.
 recordThreadCreated :: PipelineEnv -> Key PostDraft -> Text -> IO ()

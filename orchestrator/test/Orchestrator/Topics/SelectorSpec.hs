@@ -6,7 +6,7 @@ module Orchestrator.Topics.SelectorSpec (spec) where
 
 import Data.Text (Text, unpack)
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
-import Database.Persist.Sql (Entity (..), entityKey, entityVal, insert_, selectList, update, (=.), (==.))
+import Database.Persist.Sql (Entity (..), Filter, entityKey, entityVal, insert_, selectList, update, (=.), (==.))
 import Orchestrator.AI.Client (DiscoveredContent (..))
 import Orchestrator.Database.Connection (runDb)
 import Orchestrator.Database.Entities
@@ -98,7 +98,6 @@ spec = do
           insert_
             Subject
               { subjectName = "Haskell Basics",
-                subjectDescription = Nothing,
                 subjectInterestScore = score,
                 subjectCreatedAt = epoch,
                 subjectUpdatedAt = epoch
@@ -123,7 +122,6 @@ spec = do
           insert_
             Subject
               { subjectName = "Monads",
-                subjectDescription = Nothing,
                 subjectInterestScore = score,
                 subjectCreatedAt = epoch,
                 subjectUpdatedAt = epoch
@@ -131,7 +129,6 @@ spec = do
           insert_
             Subject
               { subjectName = "Error Handling",
-                subjectDescription = Nothing,
                 subjectInterestScore = score,
                 subjectCreatedAt = epoch,
                 subjectUpdatedAt = epoch
@@ -149,6 +146,28 @@ spec = do
         length result `shouldBe` 1
         links <- runDb pool $ selectList [RawContentSubjectRawContentId ==. entityKey (head result)] []
         length links `shouldBe` 2
+
+    describe "recordDiscovery" $ do
+      it "inserts a ContentSearchAiAnalysis row recording the item count" $ do
+        let items = [discovered "https://telemetry-a.com" "Title A", discovered "https://telemetry-b.com" "Title B"]
+        runDb pool $ recordDiscovery items
+        rows <- runDb pool $ selectList ([] :: [Filter ContentSearchAiAnalysis]) []
+        length rows `shouldBe` 1
+        let row = entityVal (head rows)
+        contentSearchAiAnalysisTotalItemsFound row `shouldBe` 2
+        contentSearchAiAnalysisItemsIngested row `shouldBe` 2
+
+      it "inserts one telemetry row per recordDiscovery call" $ do
+        runDb pool $ recordDiscovery [discovered "https://t1.com" "T1"]
+        runDb pool $ recordDiscovery [discovered "https://t2.com" "T2"]
+        rows <- runDb pool $ selectList ([] :: [Filter ContentSearchAiAnalysis]) []
+        length rows `shouldBe` 2
+
+      it "records zero items found when the discovered list is empty" $ do
+        runDb pool $ recordDiscovery []
+        rows <- runDb pool $ selectList ([] :: [Filter ContentSearchAiAnalysis]) []
+        length rows `shouldBe` 1
+        contentSearchAiAnalysisTotalItemsFound (entityVal (head rows)) `shouldBe` 0
 
 -- ---------------------------------------------------------------------------
 -- Helpers

@@ -48,8 +48,10 @@ createTriggers = do
 createIndexes :: SqlPersistT IO ()
 createIndexes = do
   $(executeSqlFile "sql/indexes/raw_content.sql")
+  $(executeSqlFile "sql/indexes/raw_content_subject.sql")
   $(executeSqlFile "sql/indexes/post_draft.sql")
   $(executeSqlFile "sql/indexes/post_draft_source.sql")
+  $(executeSqlFile "sql/indexes/post_draft_subject.sql")
   $(executeSqlFile "sql/indexes/review_comment.sql")
   $(executeSqlFile "sql/indexes/ai_analysis.sql")
 

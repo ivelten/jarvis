@@ -114,6 +114,7 @@ test-suite orchestrator-test
     Orchestrator.Database.ModelsSpec
     Orchestrator.Discord.BotSpec
     Orchestrator.GitHub.ClientSpec
+    Orchestrator.PipelineSpec
     Orchestrator.Posts.GeneratorSpec
     Orchestrator.TextUtilsSpec
     Orchestrator.Topics.SelectorSpec

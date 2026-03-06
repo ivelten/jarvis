@@ -31,7 +31,6 @@ share
 -- The interest score controls how eagerly new content on this subject is drafted.
 Subject
   name          Text
-  description   Text Maybe
   interestScore InterestScore
   createdAt     UTCTime
   updatedAt     UTCTime
@@ -95,11 +94,19 @@ ReviewComment
   createdAt   UTCTime
   deriving Show Eq
 
--- | AI analysis produced for a PostDraft iteration.
-AiAnalysis
+-- | AI analysis produced for a PostDraft creation or revision iteration.
+DraftAiAnalysis
   postDraftId    PostDraftId
   summary        Text
   tokensUsed     Int
   analyzedAt     UTCTime
+  deriving Show Eq
+
+-- | Telemetry record for a single content-discovery run.
+ContentSearchAiAnalysis
+  totalItemsFound  Int
+  itemsIngested    Int
+  tokensUsed       Int
+  searchedAt       UTCTime
   deriving Show Eq
 |]

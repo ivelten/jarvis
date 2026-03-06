@@ -1,6 +1,7 @@
 module Orchestrator.Topics.Selector
   ( ingestDiscoveredContent,
     ingestContent,
+    recordDiscovery,
     pendingContent,
   )
 where
@@ -13,6 +14,7 @@ import Database.Persist.Sql
     SqlPersistT,
     getBy,
     insertUnique,
+    insert_,
     selectList,
     upsertBy,
     (=.),
@@ -30,7 +32,22 @@ ingestDiscoveredContent aiCfg = do
   subjects <- selectList [] []
   let names = map (subjectName . entityVal) (subjects :: [Entity Subject])
   discovered <- liftIO $ discoverContent aiCfg names
+  recordDiscovery discovered
+
+-- | Persist a list of discovered content items and record a 'ContentSearchAiAnalysis'
+-- telemetry row.  Separated from 'ingestDiscoveredContent' so it can be tested
+-- without a real AI call.
+recordDiscovery :: [DiscoveredContent] -> SqlPersistT IO ()
+recordDiscovery discovered = do
   ingestContent discovered
+  now <- liftIO getCurrentTime
+  insert_
+    ContentSearchAiAnalysis
+      { contentSearchAiAnalysisTotalItemsFound = length discovered,
+        contentSearchAiAnalysisItemsIngested = length discovered,
+        contentSearchAiAnalysisTokensUsed = 0,
+        contentSearchAiAnalysisSearchedAt = now
+      }
 
 -- | Persist a list of already-discovered content items (upsert by URL).
 -- Triage fields (@status@, @rejectionReason@) are never overwritten on

@@ -32,7 +32,7 @@ spec = do
     it "creates all expected tables" $ do
       tables <- getPublicTables pool
       tables
-        `shouldContain` ["ai_analysis", "post_draft", "post_draft_source", "post_draft_subject", "raw_content", "raw_content_subject", "review_comment", "subject"]
+        `shouldContain` ["content_search_ai_analysis", "draft_ai_analysis", "post_draft", "post_draft_source", "post_draft_subject", "raw_content", "raw_content_subject", "review_comment", "subject"]
 
     it "creates the content_status enum type" $ do
       types <- getPgEnumTypes pool
@@ -61,7 +61,8 @@ spec = do
     it "creates created_at immutability triggers" $ do
       triggers <- getPgTriggers pool
       triggers
-        `shouldContain` [ "preserve_ai_analysis_analyzed_at",
+        `shouldContain` [ "preserve_content_search_ai_analysis_searched_at",
+                          "preserve_draft_ai_analysis_analyzed_at",
                           "preserve_post_draft_created_at",
                           "preserve_raw_content_created_at",
                           "preserve_review_comment_created_at",
@@ -75,7 +76,8 @@ spec = do
 
     it "creates FK indexes on child table columns" $ do
       indexes <- getPgIndexes pool
-      indexes `shouldContain` ["idx_ai_analysis_draft_id"]
+      indexes `shouldContain` ["idx_draft_ai_analysis_draft_id"]
+      indexes `shouldContain` ["idx_content_search_ai_analysis_searched_at"]
       indexes `shouldContain` ["idx_post_draft_source_content_id"]
       indexes `shouldContain` ["idx_post_draft_source_draft_id"]
       indexes `shouldContain` ["idx_raw_content_subject_raw_content_id"]
