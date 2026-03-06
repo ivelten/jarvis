@@ -191,7 +191,7 @@ spec = do
   describe "resolveRedirectUrl" $ do
     let realUrl = "https://example.com/fp-basics-for-csharp"
         chunkMap = Map.fromList [("Functional Programming Basics Every C# Developer Can Use Today", realUrl)]
-        itemWith url = DiscoveredContent "Functional Programming Basics Every C# Developer Can Use Today" url "A summary" Nothing
+        itemWith url = DiscoveredContent "Functional Programming Basics Every C# Developer Can Use Today" url "A summary" []
 
     it "replaces an ephemeral redirect URL with the matching real URL" $
       dcUrl (resolveRedirectUrl chunkMap (itemWith redirectUrl))
@@ -207,11 +207,11 @@ spec = do
         `shouldBe` redirectUrl
 
     it "matches when the chunk title is a substring of the item title" $ do
-      let item = DiscoveredContent "Functional Programming Basics Every C# Developer Can Use Today \8212 Deep Dive" redirectUrl "S" Nothing
+      let item = DiscoveredContent "Functional Programming Basics Every C# Developer Can Use Today \8212 Deep Dive" redirectUrl "S" []
       dcUrl (resolveRedirectUrl chunkMap item) `shouldBe` realUrl
 
     it "matches when the item title is a substring of the chunk title" $ do
-      let item = DiscoveredContent "Functional Programming Basics" redirectUrl "S" Nothing
+      let item = DiscoveredContent "Functional Programming Basics" redirectUrl "S" []
           wideMap = Map.fromList [("Functional Programming Basics Every C# Developer Can Use Today", realUrl)]
       dcUrl (resolveRedirectUrl wideMap item) `shouldBe` realUrl
 
@@ -223,11 +223,11 @@ spec = do
 
   describe "mergeWithChunks" $ do
     let chunk1 = ("Functional Programming in Haskell Guide", "https://example.com/fp-haskell")
-        item1 = ModelItem "Functional Programming in Haskell" "Great intro" (Just "Haskell Basics")
+        item1 = ModelItem "Functional Programming in Haskell" "Great intro" ["Haskell Basics"]
 
     it "pairs a model item with a matching chunk and uses the chunk's real URL" $
       mergeWithChunks [chunk1] [item1]
-        `shouldBe` [DiscoveredContent "Functional Programming in Haskell" "https://example.com/fp-haskell" "Great intro" (Just "Haskell Basics")]
+        `shouldBe` [DiscoveredContent "Functional Programming in Haskell" "https://example.com/fp-haskell" "Great intro" ["Haskell Basics"]]
 
     it "drops model items that have no matching grounding chunk" $
       mergeWithChunks
@@ -244,22 +244,22 @@ spec = do
     it "matches on a keyword from the chunk title appearing in the model title" $ do
       -- 'effectful' (10 chars) appears in the model title but not the short chunk title
       let chunk = ("effectful Haskell backend", "https://github.com/user/effectful-example")
-          item = ModelItem "Haskell RealWorld example with effectful" "A production example" Nothing
+          item = ModelItem "Haskell RealWorld example with effectful" "A production example" []
       mergeWithChunks [chunk] [item]
-        `shouldBe` [DiscoveredContent "Haskell RealWorld example with effectful" "https://github.com/user/effectful-example" "A production example" Nothing]
+        `shouldBe` [DiscoveredContent "Haskell RealWorld example with effectful" "https://github.com/user/effectful-example" "A production example" []]
 
     it "matches on a keyword from the model title appearing in the chunk title" $ do
       -- 'servant' (7 chars) appears in the chunk title
       let chunk = ("Servant Web Framework - Haskell Documentation", "https://docs.servant.dev")
-          item = ModelItem "Building REST APIs with Servant" "How to build APIs" (Just "Tooling")
+          item = ModelItem "Building REST APIs with Servant" "How to build APIs" ["Tooling"]
       mergeWithChunks [chunk] [item]
-        `shouldBe` [DiscoveredContent "Building REST APIs with Servant" "https://docs.servant.dev" "How to build APIs" (Just "Tooling")]
+        `shouldBe` [DiscoveredContent "Building REST APIs with Servant" "https://docs.servant.dev" "How to build APIs" ["Tooling"]]
 
     it "ignores short words (< 5 chars) when matching" $
       -- 'STM' is 3 chars, 'GHC' is 3 chars — no significant keyword overlap
       mergeWithChunks
         [("STM GHC API", "https://example.com/stm")]
-        [ModelItem "STM API in GHC" "About STM" Nothing]
+        [ModelItem "STM API in GHC" "About STM" []]
         `shouldBe` []
 
     it "handles multiple items and chunks, pairing each item to its best chunk" $ do
@@ -268,8 +268,8 @@ spec = do
               ("servant web framework Haskell", "https://example.com/servant")
             ]
           items =
-            [ ModelItem "Database access with Persistent" "Using persistent" (Just "Tooling"),
-              ModelItem "Web APIs with Servant" "Using servant" (Just "Tooling")
+            [ ModelItem "Database access with Persistent" "Using persistent" ["Tooling"],
+              ModelItem "Web APIs with Servant" "Using servant" ["Tooling"]
             ]
           result = mergeWithChunks chunks items
       map dcUrl result
