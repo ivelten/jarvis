@@ -14,6 +14,7 @@ module Orchestrator.Pipeline
 where
 
 import Control.Exception (SomeException, displayException, try)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, getCurrentTime)
@@ -86,7 +87,8 @@ processDraft env@PipelineEnv {..} rcKey rc = do
   markAsDrafted env rcKey now
   postDraftKey <- persistInitialDraft env rcKey rc draft now
   putStrLn "[Drafts] Draft sent to Discord for review."
-  registerForReview pipeDcCfg (mkReviewRequest env rcKey postDraftKey now draft)
+  rr <- mkReviewRequest env rcKey postDraftKey now draft
+  registerForReview pipeDcCfg rr
 
 -- | Flip the raw-content status to 'ContentDrafted' immediately so a
 -- restart does not re-pick the same item.
@@ -119,7 +121,8 @@ persistInitialDraft PipelineEnv {..} rcKey rc draft now =
             postDraftSuggestedTags = TagList (gdTags draft),
             postDraftStatus = DraftReviewing,
             postDraftDiscordThreadId = Nothing,
-            postDraftContentMarkdown = Just (gdBody draft),
+            postDraftContentMarkdownEn = Just (gdBodyEn draft),
+            postDraftContentMarkdownPtBr = Just (gdBodyPtBr draft),
             postDraftPublishedAt = Nothing,
             postDraftPublishedUrl = Nothing,
             postDraftCreatedAt = now,
@@ -133,7 +136,7 @@ persistInitialDraft PipelineEnv {..} rcKey rc draft now =
     insert_
       AiAnalysis
         { aiAnalysisPostDraftId = pdKey,
-          aiAnalysisSummary = truncateText 500 (gdBody draft),
+          aiAnalysisSummary = truncateText 500 (gdBodyEn draft),
           aiAnalysisTokensUsed = gdTokensUsed draft,
           aiAnalysisAnalyzedAt = now
         }
@@ -142,45 +145,55 @@ persistInitialDraft PipelineEnv {..} rcKey rc draft now =
 -- | Build the 'ReviewRequest' record that wires the bot callbacks back into
 -- the pipeline.  All callbacks close over the pipeline environment and the
 -- relevant DB keys, keeping 'processDraft' free of callback scaffolding.
+-- The Brazilian Portuguese body is tracked privately via an 'IORef' so that
+-- 'ReviewRequest' (and the Discord bot) only ever see the English body.
 mkReviewRequest ::
   PipelineEnv ->
   Key RawContent ->
   Key PostDraft ->
   UTCTime ->
   GeneratedDraft ->
-  ReviewRequest
-mkReviewRequest env rcKey postDraftKey createdAt draft =
-  ReviewRequest
-    { rrTitle = gdTitle draft,
-      rrBody = gdBody draft,
-      rrTags = gdTags draft,
-      rrRevise = revise,
-      rrApprove = publishDraft env rcKey postDraftKey createdAt,
-      rrReject = rejectDraft env rcKey postDraftKey,
-      rrOnUserMessage = insertComment env postDraftKey CommentAuthorUser,
-      rrOnBotMessage = insertComment env postDraftKey CommentAuthorJarvis . truncateText 500,
-      rrOnThreadCreated = recordThreadCreated env postDraftKey
-    }
+  IO ReviewRequest
+mkReviewRequest env rcKey postDraftKey createdAt draft = do
+  ptBrRef <- newIORef (gdBodyPtBr draft)
+  pure
+    ReviewRequest
+      { rrTitle = gdTitle draft,
+        rrBodyEn = gdBodyEn draft,
+        rrTags = gdTags draft,
+        rrRevise = revise ptBrRef,
+        rrApprove = approve ptBrRef,
+        rrReject = rejectDraft env rcKey postDraftKey,
+        rrOnUserMessage = insertComment env postDraftKey CommentAuthorUser,
+        rrOnBotMessage = insertComment env postDraftKey CommentAuthorJarvis . truncateText 500,
+        rrOnThreadCreated = recordThreadCreated env postDraftKey
+      }
   where
-    revise currentBody feedback = do
-      revisedDraft <- reviseDraft (pipeAiCfg env) currentBody feedback
+    revise ptBrRef currentBodyEn feedback = do
+      currentBodyPtBr <- readIORef ptBrRef
+      revisedDraft <- reviseDraft (pipeAiCfg env) currentBodyEn currentBodyPtBr feedback
+      writeIORef ptBrRef (gdBodyPtBr revisedDraft)
       recordRevision env postDraftKey revisedDraft
-      pure (gdBody revisedDraft, gdTags revisedDraft)
+      pure (gdBodyEn revisedDraft, gdTags revisedDraft)
+    approve ptBrRef finalBodyEn tags = do
+      finalBodyPtBr <- readIORef ptBrRef
+      publishDraft env rcKey postDraftKey createdAt finalBodyEn finalBodyPtBr tags
 
--- | Insert an 'AiAnalysis' row for a revision step and update the stored body.
+-- | Insert an 'AiAnalysis' row for a revision step and update the stored bodies.
 recordRevision :: PipelineEnv -> Key PostDraft -> GeneratedDraft -> IO ()
 recordRevision PipelineEnv {..} postDraftKey draft = do
   revisedAt <- getCurrentTime
   runDb pipeDbPool $ do
     update
       postDraftKey
-      [ PostDraftContentMarkdown =. Just (gdBody draft),
+      [ PostDraftContentMarkdownEn =. Just (gdBodyEn draft),
+        PostDraftContentMarkdownPtBr =. Just (gdBodyPtBr draft),
         PostDraftUpdatedAt =. revisedAt
       ]
     insert_
       AiAnalysis
         { aiAnalysisPostDraftId = postDraftKey,
-          aiAnalysisSummary = truncateText 500 (gdBody draft),
+          aiAnalysisSummary = truncateText 500 (gdBodyEn draft),
           aiAnalysisTokensUsed = gdTokensUsed draft,
           aiAnalysisAnalyzedAt = revisedAt
         }
@@ -218,17 +231,22 @@ publishDraft ::
   Key PostDraft ->
   -- | Draft creation timestamp — used as the Hugo front-matter @date@ field.
   UTCTime ->
-  -- | Final body (may differ from original draft after revisions).
+  -- | Final English body (may differ from original draft after revisions).
+  Text ->
+  -- | Final Brazilian Portuguese body.
   Text ->
   -- | Final tags.
   [Text] ->
   IO ()
-publishDraft PipelineEnv {..} rcKey postDraftKey createdAt finalBody tags = do
-  let (finalTitle, _) = splitTitle finalBody
+publishDraft PipelineEnv {..} rcKey postDraftKey createdAt finalBodyEn finalBodyPtBr tags = do
+  let (finalTitle, bodyEn) = splitTitle finalBodyEn
+      (titlePtBr, bodyPtBr) = splitTitle finalBodyPtBr
       finalSlug = toSlug finalTitle
-      finalFilename = finalSlug <> ".md"
-      mdContent = renderHugoPost finalTitle finalSlug createdAt tags finalBody
-  putStrLn $ "[Drafts] Approved! Committing " <> T.unpack finalFilename <> " to GitHub..."
+      mdContentEn = renderHugoPost finalTitle finalSlug createdAt tags bodyEn
+      mdContentPtBr = renderHugoPost titlePtBr finalSlug createdAt tags bodyPtBr
+      filenameEn = finalSlug <> ".en.md"
+      filenamePtBr = finalSlug <> ".pt-br.md"
+  putStrLn $ "[Drafts] Approved! Committing " <> T.unpack filenameEn <> " and " <> T.unpack filenamePtBr <> " to GitHub..."
   approvedAt <- getCurrentTime
   runDb pipeDbPool $
     update
@@ -237,7 +255,10 @@ publishDraft PipelineEnv {..} rcKey postDraftKey createdAt finalBody tags = do
         PostDraftUpdatedAt =. approvedAt
       ]
   commitResult <-
-    (try (commitPost pipeGhCfg finalTitle finalFilename mdContent)) ::
+    ( try $ do
+        commitPost pipeGhCfg finalTitle filenameEn mdContentEn
+        commitPost pipeGhCfg finalTitle filenamePtBr mdContentPtBr
+    ) ::
       IO (Either SomeException ())
   case commitResult of
     Left ex -> do
@@ -259,13 +280,14 @@ publishDraft PipelineEnv {..} rcKey postDraftKey createdAt finalBody tags = do
           [ PostDraftTitle =. finalTitle,
             PostDraftGitBranch =. "draft/" <> finalSlug,
             PostDraftStatus =. DraftPublished,
-            PostDraftContentMarkdown =. Just mdContent,
+            PostDraftContentMarkdownEn =. Just mdContentEn,
+            PostDraftContentMarkdownPtBr =. Just mdContentPtBr,
             PostDraftPublishedAt =. Just publishedAt',
             PostDraftUpdatedAt =. publishedAt'
           ]
       putStrLn "[Drafts] Post committed to GitHub. Triggering deploy workflow..."
       deployResult <-
-        (try (triggerDeploy pipeGhCfg)) ::
+        try (triggerDeploy pipeGhCfg) ::
           IO (Either SomeException ())
       case deployResult of
         Left ex ->
@@ -291,7 +313,6 @@ rejectDraft PipelineEnv {..} rcKey postDraftKey reason = do
       [ PostDraftStatus =. DraftRejected,
         PostDraftUpdatedAt =. rejectedAt
       ]
-  putStrLn $ "[Drafts] Draft rejected: " <> T.unpack reason
 
 -- ---------------------------------------------------------------------------
 -- Utilities

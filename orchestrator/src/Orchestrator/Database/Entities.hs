@@ -59,7 +59,8 @@ PostDraft
   suggestedTags    TagList
   status           DraftStatus
   discordThreadId  Text Maybe
-  contentMarkdown  Text Maybe
+  contentMarkdownEn    Text Maybe
+  contentMarkdownPtBr  Text Maybe
   publishedAt      UTCTime Maybe
   publishedUrl     Text Maybe
   createdAt        UTCTime

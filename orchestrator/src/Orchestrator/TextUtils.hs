@@ -83,12 +83,32 @@ chunkText maxLen = filter (not . T.null) . map T.strip . go
                in (prefix <> c, l)
 
     bestSplit window =
-      repairMarkdownLink $
-        case breakLast "\n\n" window of
-          Just p -> p
-          Nothing -> case breakLast "\n" window of
+      repairOrphanedBracket $
+        repairMarkdownLink $
+          case breakLast "\n\n" window of
             Just p -> p
-            Nothing -> fromMaybe (window, "") (breakLastWord window)
+            Nothing -> case breakLast "\n" window of
+              Just p -> p
+              Nothing -> fromMaybe (window, "") (breakLastWord window)
+
+    -- \| If the leftover starts with @[…@ that is NOT a Markdown link (i.e.
+    -- no @](@ found within its first 200 characters), retreat the split to the
+    -- last newline boundary inside the chunk.  This prevents a bare token such
+    -- as @[JSON]@ — a continuation line inside a list item — from opening a
+    -- new Discord message without its surrounding list context.
+    repairOrphanedBracket :: (Text, Text) -> (Text, Text)
+    repairOrphanedBracket p@(chunk, leftover) =
+      let stripped = T.dropWhile (== ' ') leftover
+       in if "[" `T.isPrefixOf` stripped
+            && not ("]( " `T.isInfixOf` T.take 200 stripped)
+            && not ("](" `T.isInfixOf` T.take 200 stripped)
+            then case breakLast "\n" (T.stripEnd chunk) of
+              Just (lineChunk, _)
+                | not (T.null (T.stripEnd lineChunk)) ->
+                    let lc = T.stripEnd lineChunk
+                     in (lc, T.drop (T.length lc) (chunk <> leftover))
+              _ -> p
+            else p
 
     -- \| If the chunk ends with an unclosed Markdown link opener @[…@ (i.e. a
     -- @[@ with no subsequent @](@ before the end of the chunk), retreat the

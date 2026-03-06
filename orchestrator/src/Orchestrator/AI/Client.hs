@@ -15,6 +15,7 @@ module Orchestrator.AI.Client
     mergeWithChunks,
     followRedirect,
     parseTagsLine,
+    parseBilingualResponse,
   )
 where
 
@@ -106,9 +107,11 @@ data GeneratedDraft = GeneratedDraft
   { gdTitle :: !Text,
     -- | Git branch name to push the draft to, e.g. @"draft/my-post-title"@.
     gdBranch :: !Text,
-    -- | Markdown body (without the leading TAGS line; Hugo front-matter is
-    -- added separately by 'renderHugoPost').
-    gdBody :: !Text,
+    -- | English Markdown body (without the leading TAGS line; Hugo front-matter
+    -- is added separately by 'renderHugoPost').
+    gdBodyEn :: !Text,
+    -- | Brazilian Portuguese Markdown body.
+    gdBodyPtBr :: !Text,
     -- | Tags extracted from the leading @TAGS:@ line of the AI output.
     gdTags :: ![Text],
     -- | Total tokens consumed by this generation call
@@ -122,7 +125,8 @@ instance FromJSON GeneratedDraft where
     GeneratedDraft
       <$> o .: "gdTitle"
       <*> o .: "gdBranch"
-      <*> o .: "gdBody"
+      <*> o .: "gdBodyEn"
+      <*> o .: "gdBodyPtBr"
       <*> (o .:? "gdTags" .!= [])
       <*> (o .:? "gdTokensUsed" .!= 0)
 
@@ -131,7 +135,8 @@ instance ToJSON GeneratedDraft where
     object
       [ "gdTitle" .= gdTitle,
         "gdBranch" .= gdBranch,
-        "gdBody" .= gdBody,
+        "gdBodyEn" .= gdBodyEn,
+        "gdBodyPtBr" .= gdBodyPtBr,
         "gdTags" .= gdTags,
         "gdTokensUsed" .= gdTokensUsed
       ]
@@ -150,7 +155,7 @@ draftPromptTemplate :: Text
 draftPromptTemplate = TE.decodeUtf8 $(makeRelativeToProject "prompts/generate_draft.txt" >>= embedFile)
 
 -- | Prompt template for 'reviseDraft' – embedded from @prompts/revise_draft.txt@.
--- The literals @{{DRAFT}}@ and @{{FEEDBACK}}@ are replaced at runtime.
+-- The literals @{{DRAFT_EN}}@, @{{DRAFT_PTBR}}@, and @{{FEEDBACK}}@ are replaced at runtime.
 revisePromptTemplate :: Text
 revisePromptTemplate = TE.decodeUtf8 $(makeRelativeToProject "prompts/revise_draft.txt" >>= embedFile)
 
@@ -270,7 +275,7 @@ defaultGenerationConfig :: Value
 defaultGenerationConfig =
   object
     [ "temperature" .= (0.7 :: Double),
-      "maxOutputTokens" .= (8192 :: Int)
+      "maxOutputTokens" .= (16384 :: Int)
     ]
 
 -- ---------------------------------------------------------------------------
@@ -410,13 +415,11 @@ discoverContent cfg = do
         ]
 
 -- | Ask Gemini to write a full Markdown blog post draft based on the provided
---   content sources.
+--   content sources.  Returns both an English and a Brazilian Portuguese version.
 generateDraft :: AiConfig -> [DiscoveredContent] -> IO GeneratedDraft
 generateDraft cfg sources = do
   (mdText, tokensUsed) <- callGemini cfg requestBody'
-  let (tags, body) = parseTagsLine mdText
-      (title, _) = splitTitle body
-  pure GeneratedDraft {gdTitle = title, gdBranch = "draft/" <> toSlug title, gdBody = body, gdTags = tags, gdTokensUsed = tokensUsed}
+  pure (assembleGeneratedDraft tokensUsed mdText)
   where
     sourcesBlock = T.unlines $ zipWith formatSource ([1 ..] :: [Int]) sources
     formatSource i dc =
@@ -434,20 +437,19 @@ generateDraft cfg sources = do
           "generationConfig" .= defaultGenerationConfig
         ]
 
--- | Ask Gemini to revise an existing draft based on reviewer feedback.
+-- | Ask Gemini to revise an existing bilingual draft based on reviewer feedback.
 --
 -- The returned 'GeneratedDraft' has the same 'gdBranch' derived from the
--- (possibly updated) title in the revised content.
-reviseDraft :: AiConfig -> Text -> Text -> IO GeneratedDraft
-reviseDraft cfg currentBody feedback = do
+-- (possibly updated) title in the revised English content.
+reviseDraft :: AiConfig -> Text -> Text -> Text -> IO GeneratedDraft
+reviseDraft cfg currentBodyEn currentBodyPtBr feedback = do
   (mdText, tokensUsed) <- callGemini cfg requestBody'
-  let (tags, body) = parseTagsLine mdText
-      (title', _) = splitTitle body
-  pure GeneratedDraft {gdTitle = title', gdBranch = "draft/" <> toSlug title', gdBody = body, gdTags = tags, gdTokensUsed = tokensUsed}
+  pure (assembleGeneratedDraft tokensUsed mdText)
   where
     prompt =
-      T.replace "{{DRAFT}}" currentBody $
-        T.replace "{{FEEDBACK}}" feedback revisePromptTemplate
+      T.replace "{{DRAFT_EN}}" currentBodyEn $
+        T.replace "{{DRAFT_PTBR}}" currentBodyPtBr $
+          T.replace "{{FEEDBACK}}" feedback revisePromptTemplate
     requestBody' =
       object
         [ "contents" .= [userContents prompt],
@@ -457,6 +459,21 @@ reviseDraft cfg currentBody feedback = do
 -- ---------------------------------------------------------------------------
 -- Utilities
 -- ---------------------------------------------------------------------------
+
+-- | Assemble a 'GeneratedDraft' from a raw Gemini response text and token count.
+-- Shared by 'generateDraft' and 'reviseDraft'.
+assembleGeneratedDraft :: Int -> Text -> GeneratedDraft
+assembleGeneratedDraft tokensUsed mdText =
+  let (tags, bodyEn, bodyPtBr) = parseBilingualResponse mdText
+      (title, _) = splitTitle bodyEn
+   in GeneratedDraft
+        { gdTitle = title,
+          gdBranch = "draft/" <> toSlug title,
+          gdBodyEn = bodyEn,
+          gdBodyPtBr = bodyPtBr,
+          gdTags = tags,
+          gdTokensUsed = tokensUsed
+        }
 
 -- | Parse and remove a leading @TAGS: tag1, tag2, ...@ line from AI output.
 -- Returns the list of trimmed tags (empty if no TAGS line) and the remaining
@@ -472,3 +489,22 @@ parseTagsLine txt = case T.lines txt of
         let tags = filter (not . T.null) . map T.strip . T.splitOn "," $ raw
          in (tags, T.strip (T.unlines rest))
   _ -> ([], txt)
+
+-- | Parse the bilingual output format produced by the generate/revise prompts.
+-- Strips the @TAGS:@ line, then splits the content on @---PTBR---@, yielding
+-- the English body and the Brazilian Portuguese body.  The @---EN---@ header
+-- line is removed from the English section.
+--
+-- Falls back gracefully: if the @---PTBR---@ separator is absent the entire
+-- body is treated as English and the Portuguese body is empty.
+parseBilingualResponse :: Text -> ([Text], Text, Text)
+parseBilingualResponse txt =
+  let (tags, rest) = parseTagsLine txt
+      ls = T.lines (T.strip rest)
+      (enLines, ptbrLines) = splitOnMarker "---PTBR---" ls
+      cleanEn = dropWhile (\l -> T.strip l == "---EN---") enLines
+   in (tags, T.strip (T.unlines cleanEn), T.strip (T.unlines ptbrLines))
+  where
+    splitOnMarker marker ls =
+      let (before, after) = break (\l -> T.strip l == marker) ls
+       in (before, drop 1 after)

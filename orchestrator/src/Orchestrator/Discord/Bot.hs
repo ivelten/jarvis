@@ -35,9 +35,9 @@ import Orchestrator.TextUtils (chunkText, truncateText)
 data PendingReview = PendingReview
   { -- | Post title (used for context).
     prTitle :: !Text,
-    -- | Current draft body; updated atomically after each AI revision.
-    prCurrentBody :: !(TVar Text),
-    -- | Current tags; updated atomically alongside 'prCurrentBody' after each revision.
+    -- | Current English draft body; updated atomically after each AI revision.
+    prCurrentBodyEn :: !(TVar Text),
+    -- | Current tags; updated atomically alongside the body after each revision.
     prCurrentTags :: !(TVar [Text]),
     -- | Lookup key: forum thread Snowflake as text.  Because in a forum
     -- channel the thread ID equals the starter message ID, one key serves
@@ -45,7 +45,7 @@ data PendingReview = PendingReview
     prKey :: !Text,
     -- | Thread 'ChannelId' for posting revision replies.
     prThreadId :: !ChannelId,
-    -- | @(currentBody, feedback) -> (revisedBody, revisedTags)@.  Called on every thread message.
+    -- | @(currentBodyEn, feedback) -> (revisedBodyEn, revisedTags)@.
     prRevise :: Text -> Text -> IO (Text, [Text]),
     -- | Called with the final body and tags when ✅ is received or an approval phrase is typed.
     prApprove :: Text -> [Text] -> IO (),
@@ -53,7 +53,7 @@ data PendingReview = PendingReview
     prReject :: Text -> IO (),
     -- | Called with the text of each message the human reviewer sends.
     prOnUserMessage :: Text -> IO (),
-    -- | Called with the text of each reply posted by the bot (revised drafts).
+    -- | Called with the English body of each reply posted by the bot (revised drafts).
     prOnBotMessage :: Text -> IO ()
   }
 
@@ -62,22 +62,19 @@ data PendingReview = PendingReview
 data ReviewRequest = ReviewRequest
   { -- | Post title shown in the embed and as the thread name.
     rrTitle :: !Text,
-    -- | Full Markdown draft body.
-    rrBody :: !Text,
+    -- | Full English Markdown draft body.
+    rrBodyEn :: !Text,
     -- | Initial tags from the draft; kept in sync with the body after revisions.
     rrTags :: ![Text],
-    -- | @(currentBody, feedback) -> (revisedBody, revisedTags)@.  Called for each reviewer
-    -- message in the thread that is not an approval.
+    -- | @(currentBodyEn, feedback) -> (revisedBodyEn, revisedTags)@.
     rrRevise :: Text -> Text -> IO (Text, [Text]),
-    -- | Called with the final body and tags when the reviewer approves (✅ reaction or
-    -- approval phrase in the thread).
+    -- | Called with the final body and tags when the reviewer approves.
     rrApprove :: Text -> [Text] -> IO (),
-    -- | Called with the rejection reason (e.g. the ❌ emoji) when rejected.
+    -- | Called with the rejection reason when rejected.
     rrReject :: Text -> IO (),
-    -- | Called with the text of each message the human reviewer sends in the thread
-    -- (feedback, approval phrase, or rejection emoji from a reaction).
+    -- | Called with the text of each message the human reviewer sends in the thread.
     rrOnUserMessage :: Text -> IO (),
-    -- | Called with the text of each reply the bot posts (i.e. a revised draft).
+    -- | Called with the English body of each reply the bot posts (i.e. a revised draft).
     rrOnBotMessage :: Text -> IO (),
     -- | Called with the Discord thread ID (as 'Text') once the review thread
     -- has been created.  Useful for persisting the thread ID back to the DB.
@@ -188,13 +185,14 @@ drainQueue hdl cfg = forever $ do
     Left ex -> putStrLn $ "[Discord] drainQueue exception: " <> displayException ex
     Right () -> pure ()
 
+-- | Create the forum thread, post the draft, and register the pending review.
 processReview :: DiscordHandle -> DiscordConfig -> ReviewRequest -> IO ()
 processReview hdl cfg ReviewRequest {..} = do
   let chanId = mkChannelId (dcChannelId cfg)
       embed =
         def
           { createEmbedTitle = rrTitle,
-            createEmbedDescription = truncateText 500 rrBody,
+            createEmbedDescription = truncateText 500 rrBodyEn,
             createEmbedFooterText =
               "React " <> emojiApprove <> " to approve, " <> emojiReject <> " to reject, or type feedback in the thread."
           }
@@ -222,18 +220,17 @@ processReview hdl cfg ReviewRequest {..} = do
           -- In a forum channel the starter message ID equals the thread ID.
           starterMsgId = DiscordId (unId tid) :: MessageId
       putStrLn $ "[Discord] Thread created (tid=" <> T.unpack key <> "), posting draft body..."
-      -- Post full draft body as the first thread reply (split across messages if needed).
-      postChunked hdl tid (emojiDraft <> " **Draft:**\n\n") rrBody
+      postChunked hdl tid (emojiDraft <> " **Draft:**\n\n") rrBodyEn
       -- Wait before adding reactions so they don't compete for the rate-limit
       -- bucket with the last draft chunk.
       threadDelay 2_000_000
       -- Build and register the PendingReview.
-      bodyVar <- newTVarIO rrBody
+      bodyEnVar <- newTVarIO rrBodyEn
       tagsVar <- newTVarIO rrTags
       let pr =
             PendingReview
               { prTitle = rrTitle,
-                prCurrentBody = bodyVar,
+                prCurrentBodyEn = bodyEnVar,
                 prCurrentTags = tagsVar,
                 prKey = key,
                 prThreadId = tid,
@@ -276,9 +273,9 @@ eventHandler cfg (MessageReactionAdd ri) = do
           if emoji == emojiApprove
             then do
               prOnUserMessage pr emoji
-              body <- readTVarIO (prCurrentBody pr)
+              bodyEn <- readTVarIO (prCurrentBodyEn pr)
               tags <- readTVarIO (prCurrentTags pr)
-              prApprove pr body tags
+              prApprove pr bodyEn tags
             else do
               prOnUserMessage pr emoji
               prReject pr emoji
@@ -296,9 +293,9 @@ eventHandler cfg (MessageCreate m) = do
           then liftIO $ do
             atomically $ deregister cfg key
             prOnUserMessage pr (messageContent m)
-            body <- readTVarIO (prCurrentBody pr)
+            bodyEn <- readTVarIO (prCurrentBodyEn pr)
             tags <- readTVarIO (prCurrentTags pr)
-            prApprove pr body tags
+            prApprove pr bodyEn tags
           else handleRevision pr (messageContent m)
 eventHandler _ _ = pure ()
 
@@ -318,14 +315,14 @@ deregister :: DiscordConfig -> Text -> STM ()
 deregister cfg key =
   modifyTVar' (dcReviewMap cfg) (Map.delete key)
 
--- | Call the AI revision function and post the result back into the thread.
--- On failure, post an error message instead.
+-- | Call the AI revision function and post the revised English draft back
+-- into the thread.  On failure, post an error message instead.
 handleRevision :: PendingReview -> Text -> DiscordHandler ()
 handleRevision pr feedback = do
   liftIO $ prOnUserMessage pr feedback
   result <- liftIO $ do
-    currentBody <- readTVarIO (prCurrentBody pr)
-    try (prRevise pr currentBody feedback) :: IO (Either SomeException (Text, [Text]))
+    currentBodyEn <- readTVarIO (prCurrentBodyEn pr)
+    try (prRevise pr currentBodyEn feedback) :: IO (Either SomeException (Text, [Text]))
   case result of
     Left ex -> do
       let errMsg = "Could not revise draft: " <> T.pack (displayException ex)
@@ -335,13 +332,13 @@ handleRevision pr feedback = do
           CreateMessage
             (prThreadId pr)
             (emojiWarning <> " " <> errMsg)
-    Right (newBody, newTags) -> do
+    Right (newBodyEn, newTags) -> do
       liftIO $ atomically $ do
-        writeTVar (prCurrentBody pr) newBody
+        writeTVar (prCurrentBodyEn pr) newBodyEn
         writeTVar (prCurrentTags pr) newTags
-      liftIO $ prOnBotMessage pr newBody
+      liftIO $ prOnBotMessage pr newBodyEn
       hdl <- ask
-      liftIO $ postChunked hdl (prThreadId pr) (emojiRevise <> " **Revised draft:**\n\n") newBody
+      liftIO $ postChunked hdl (prThreadId pr) (emojiRevise <> " **Revised draft:**\n\n") newBodyEn
 
 -- ---------------------------------------------------------------------------
 -- Utilities

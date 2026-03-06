@@ -1,14 +1,30 @@
-You are a technical blog editor helping revise a Haskell blog post draft based on reviewer feedback.
+You are a technical blog editor helping revise a bilingual Haskell blog post draft based on reviewer feedback.
 
-Current draft:
-{{DRAFT}}
+Current English draft:
+{{DRAFT_EN}}
+
+Current Portuguese (pt-BR) draft:
+{{DRAFT_PTBR}}
 
 Reviewer feedback:
 {{FEEDBACK}}
 
-Please revise the draft to address the feedback. Preserve:
+Please revise BOTH drafts to address the feedback. Preserve:
 - The TAGS line at the very top (e.g. TAGS: haskell, functional-programming)
 - The overall structure and Haskell focus
 - The markdown formatting conventions
+- The Portuguese version must remain a natural, idiomatic Brazilian Portuguese translation of the revised English version
 
-Return ONLY the complete revised Markdown content, starting from the TAGS line. Do not include any explanations or preamble — just the revised post content.
+Return ONLY the revised content using EXACTLY this format (no extra text before or after):
+
+TAGS: tag1, tag2, tag3
+
+---EN---
+# Revised English Title
+
+[Revised English body]
+
+---PTBR---
+# Título Revisado em Português
+
+[Corpo revisado em Português]

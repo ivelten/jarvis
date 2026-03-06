@@ -119,6 +119,37 @@ spec = do
       let (tags, _) = parseTagsLine "TAGS: haskell,,dotnet\n# T\n"
       tags `shouldBe` ["haskell", "dotnet"]
 
+  describe "parseBilingualResponse" $ do
+    let bilingualInput =
+          "TAGS: haskell, fp\n\n---EN---\n# English Title\nEnglish body.\n\n---PTBR---\n# Título\nCorpo em português.\n"
+
+    it "extracts the English body (without ---EN--- marker)" $ do
+      let (_, en, _) = parseBilingualResponse bilingualInput
+      T.isPrefixOf "# English Title" (T.strip en) `shouldBe` True
+
+    it "extracts the Portuguese body (without ---PTBR--- marker)" $ do
+      let (_, _, ptbr) = parseBilingualResponse bilingualInput
+      T.isPrefixOf "# Título" (T.strip ptbr) `shouldBe` True
+
+    it "does not include the ---EN--- or ---PTBR--- markers in the bodies" $ do
+      let (_, en, ptbr) = parseBilingualResponse bilingualInput
+      T.isInfixOf "---EN---" en `shouldBe` False
+      T.isInfixOf "---PTBR---" ptbr `shouldBe` False
+
+    it "extracts the tags list" $ do
+      let (tags, _, _) = parseBilingualResponse bilingualInput
+      tags `shouldBe` ["haskell", "fp"]
+
+    it "returns empty PT body when ---PTBR--- section is absent" $ do
+      let input = "TAGS: t\n\n---EN---\n# Title\nBody.\n"
+          (_, _, ptbr) = parseBilingualResponse input
+      T.strip ptbr `shouldBe` ""
+
+    it "returns empty tags when TAGS line is absent" $ do
+      let input = "---EN---\n# Title\nBody.\n\n---PTBR---\nCorpo.\n"
+          (tags, _, _) = parseBilingualResponse input
+      tags `shouldBe` []
+
   describe "extractGroundingChunks" $ do
     it "returns an empty list when there are no candidates" $
       extractGroundingChunks (object ["candidates" .= ([] :: [Value])])
