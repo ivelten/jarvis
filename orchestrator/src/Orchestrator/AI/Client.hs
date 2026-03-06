@@ -14,6 +14,7 @@ module Orchestrator.AI.Client
     resolveRedirectUrl,
     mergeWithChunks,
     followRedirect,
+    extractQParam,
     parseTagsLine,
     parseBilingualResponse,
   )
@@ -350,19 +351,37 @@ mergeWithChunks chunks = mapMaybe matchItem
       any (\w -> T.length w >= 5 && w `T.isInfixOf` b) (T.words a)
         || any (\w -> T.length w >= 5 && w `T.isInfixOf` a) (T.words b)
 
+-- | Extract the value of the @q@ query-string parameter from a URL.
+--
+-- Google's newer redirect format embeds the real URL directly as the @q@
+-- parameter (e.g. @vertexaisearch.google.com\/url?q=https:\/\/...@), so no
+-- network request is needed at all.
+extractQParam :: Text -> Maybe Text
+extractQParam url =
+  case T.breakOn "?q=" url of
+    (_, rest) | not (T.null rest) -> Just $ T.takeWhile (/= '&') (T.drop 3 rest)
+    _ ->
+      case T.breakOn "&q=" url of
+        (_, rest) | not (T.null rest) -> Just $ T.takeWhile (/= '&') (T.drop 3 rest)
+        _ -> Nothing
+
 -- | Follow a single HTTP redirect and return the resolved permanent URL.
 --
--- Makes a GET request with redirect-following disabled (@redirectCount = 0@)
--- and reads the @Location@ response header.  This resolves ephemeral
--- @vertexaisearch.cloud.google.com\/grounding-api-redirect\/...@ URLs to the
--- real article URL while the redirect token is still valid (i.e. immediately
--- after the Gemini API call that produced it).
+-- First checks whether the real URL is embedded as a @q=@ query parameter
+-- (the @vertexaisearch.google.com\/url?q=...@ format Google now uses) and
+-- returns it immediately without making any network request.
+--
+-- Falls back to making a GET request with redirect-following disabled
+-- (@redirectCount = 0@) and reading the @Location@ response header, which
+-- handles the older @vertexaisearch.cloud.google.com\/grounding-api-redirect\/...@
+-- format.
 --
 -- Non-redirect URLs (no @vertexaisearch@ substring) are returned unchanged.
 -- If the server returns no @Location@ header the original URL is kept.
 followRedirect :: Manager -> Text -> IO Text
 followRedirect mgr url
   | not ("vertexaisearch" `T.isInfixOf` url) = pure url
+  | Just real <- extractQParam url = pure real
   | otherwise = do
       req <- parseRequest (T.unpack url)
       resp <- httpLbs req {redirectCount = 0} mgr

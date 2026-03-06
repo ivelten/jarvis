@@ -215,11 +215,33 @@ spec = do
           wideMap = Map.fromList [("Functional Programming Basics Every C# Developer Can Use Today", realUrl)]
       dcUrl (resolveRedirectUrl wideMap item) `shouldBe` realUrl
 
+  describe "extractQParam" $ do
+    it "extracts the q= parameter from a vertexaisearch.google.com/url redirect" $
+      extractQParam "https://vertexaisearch.google.com/url?q=https://betterprogramming.pub/article-123&sa=U&ved=abc&usg=xyz"
+        `shouldBe` Just "https://betterprogramming.pub/article-123"
+
+    it "extracts a q= parameter that appears after other params" $
+      extractQParam "https://example.com/redirect?sa=U&q=https://real.example.com/page&usg=xyz"
+        `shouldBe` Just "https://real.example.com/page"
+
+    it "returns Nothing when there is no q= parameter" $
+      extractQParam "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AQCKFx..."
+        `shouldBe` Nothing
+
+    it "returns Nothing for a plain URL with no query string" $
+      extractQParam "https://already-real.example.com"
+        `shouldBe` Nothing
+
   describe "followRedirect" $ do
     it "returns a non-redirect URL unchanged (no HTTP call made)" $ do
       mgr <- newManager defaultManagerSettings
       result <- followRedirect mgr "https://already-real.example.com"
       result `shouldBe` "https://already-real.example.com"
+
+    it "extracts the real URL from a q= param without making an HTTP request" $ do
+      mgr <- newManager defaultManagerSettings
+      result <- followRedirect mgr "https://vertexaisearch.google.com/url?q=https://betterprogramming.pub/article&sa=U&usg=xyz"
+      result `shouldBe` "https://betterprogramming.pub/article"
 
   describe "mergeWithChunks" $ do
     let chunk1 = ("Functional Programming in Haskell Guide", "https://example.com/fp-haskell")
