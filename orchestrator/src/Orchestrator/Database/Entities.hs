@@ -43,7 +43,6 @@ RawContent
   url             Text
   summary         Text
   status          ContentStatus
-  rejectionReason Text Maybe
   createdAt       UTCTime
   updatedAt       UTCTime
   UniqueContentUrl url

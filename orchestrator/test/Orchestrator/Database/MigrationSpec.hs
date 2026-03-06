@@ -165,7 +165,6 @@ spec = do
                   rawContentUrl = "https://example.com/source",
                   rawContentSummary = "Summary.",
                   rawContentStatus = ContentNew,
-                  rawContentRejectionReason = Nothing,
                   rawContentCreatedAt = now,
                   rawContentUpdatedAt = now
                 }
@@ -269,7 +268,6 @@ roundTripStatus pool status = do
             rawContentUrl = url,
             rawContentSummary = "A test summary.",
             rawContentStatus = status,
-            rawContentRejectionReason = Nothing,
             rawContentCreatedAt = now,
             rawContentUpdatedAt = now
           }

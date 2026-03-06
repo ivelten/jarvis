@@ -31,21 +31,21 @@ ingestDiscoveredContent :: AiConfig -> SqlPersistT IO ()
 ingestDiscoveredContent aiCfg = do
   subjects <- selectList [] []
   let names = map (subjectName . entityVal) (subjects :: [Entity Subject])
-  discovered <- liftIO $ discoverContent aiCfg names
-  recordDiscovery discovered
+  (tokensUsed, discovered) <- liftIO $ discoverContent aiCfg names
+  recordDiscovery tokensUsed discovered
 
 -- | Persist a list of discovered content items and record a 'ContentSearchAiAnalysis'
 -- telemetry row.  Separated from 'ingestDiscoveredContent' so it can be tested
 -- without a real AI call.
-recordDiscovery :: [DiscoveredContent] -> SqlPersistT IO ()
-recordDiscovery discovered = do
+recordDiscovery :: Int -> [DiscoveredContent] -> SqlPersistT IO ()
+recordDiscovery tokensUsed discovered = do
   ingestContent discovered
   now <- liftIO getCurrentTime
   insert_
     ContentSearchAiAnalysis
       { contentSearchAiAnalysisTotalItemsFound = length discovered,
         contentSearchAiAnalysisItemsIngested = length discovered,
-        contentSearchAiAnalysisTokensUsed = 0,
+        contentSearchAiAnalysisTokensUsed = tokensUsed,
         contentSearchAiAnalysisSearchedAt = now
       }
 
@@ -69,7 +69,6 @@ ingestContent = mapM_ ingestOne
               rawContentUrl = dcUrl dc,
               rawContentSummary = dcSummary dc,
               rawContentStatus = ContentNew,
-              rawContentRejectionReason = Nothing,
               rawContentCreatedAt = now,
               rawContentUpdatedAt = now
             }

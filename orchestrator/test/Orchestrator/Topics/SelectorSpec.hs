@@ -150,21 +150,22 @@ spec = do
     describe "recordDiscovery" $ do
       it "inserts a ContentSearchAiAnalysis row recording the item count" $ do
         let items = [discovered "https://telemetry-a.com" "Title A", discovered "https://telemetry-b.com" "Title B"]
-        runDb pool $ recordDiscovery items
+        runDb pool $ recordDiscovery 42 items
         rows <- runDb pool $ selectList ([] :: [Filter ContentSearchAiAnalysis]) []
         length rows `shouldBe` 1
         let row = entityVal (head rows)
         contentSearchAiAnalysisTotalItemsFound row `shouldBe` 2
         contentSearchAiAnalysisItemsIngested row `shouldBe` 2
+        contentSearchAiAnalysisTokensUsed row `shouldBe` 42
 
       it "inserts one telemetry row per recordDiscovery call" $ do
-        runDb pool $ recordDiscovery [discovered "https://t1.com" "T1"]
-        runDb pool $ recordDiscovery [discovered "https://t2.com" "T2"]
+        runDb pool $ recordDiscovery 10 [discovered "https://t1.com" "T1"]
+        runDb pool $ recordDiscovery 20 [discovered "https://t2.com" "T2"]
         rows <- runDb pool $ selectList ([] :: [Filter ContentSearchAiAnalysis]) []
         length rows `shouldBe` 2
 
       it "records zero items found when the discovered list is empty" $ do
-        runDb pool $ recordDiscovery []
+        runDb pool $ recordDiscovery 5 []
         rows <- runDb pool $ selectList ([] :: [Filter ContentSearchAiAnalysis]) []
         length rows `shouldBe` 1
         contentSearchAiAnalysisTotalItemsFound (entityVal (head rows)) `shouldBe` 0
@@ -183,7 +184,6 @@ rawContent url status =
       rawContentUrl = url,
       rawContentSummary = "Test summary",
       rawContentStatus = status,
-      rawContentRejectionReason = Nothing,
       rawContentCreatedAt = epoch,
       rawContentUpdatedAt = epoch
     }

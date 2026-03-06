@@ -394,12 +394,12 @@ checkUrl mgr url = do
 -- immediately (while still valid) via 'followRedirect' to obtain the real,
 -- permanent source URLs.  The HTML body of each resolved URL is then fetched
 -- generator.
-discoverContent :: AiConfig -> [Text] -> IO [DiscoveredContent]
+discoverContent :: AiConfig -> [Text] -> IO (Int, [DiscoveredContent])
 discoverContent cfg subjects = do
-  (txt, _) <- callGemini cfg requestBody'
+  (txt, tokensUsed) <- callGemini cfg requestBody'
   items <- decodeText (stripFences txt) :: IO [DiscoveredContent]
   results <- mapM (resolveItem (aiManager cfg)) items
-  pure (catMaybes results)
+  pure (tokensUsed, catMaybes results)
   where
     bullets = T.unlines ["  - " <> s | s <- subjects]
     names = T.intercalate ", " (map (\s -> "\"" <> s <> "\"") subjects)
