@@ -41,6 +41,108 @@ spec = do
       extractText (object ["other" .= ("x" :: Text)])
         `shouldBe` Nothing
 
+    it "returns Nothing when the candidate has no 'content' field (e.g. finishReason=RECITATION)" $
+      extractText
+        ( object
+            [ "candidates"
+                .= [ object
+                       [ "finishReason" .= ("RECITATION" :: Text)
+                       ]
+                   ]
+            ]
+        )
+        `shouldBe` Nothing
+
+    it "skips thought parts and returns the first non-thought text part" $
+      extractText
+        ( object
+            [ "candidates"
+                .= [ object
+                       [ "content"
+                           .= object
+                             [ "parts"
+                                 .= [ object ["text" .= ("internal reasoning..." :: Text), "thought" .= True],
+                                      object ["text" .= ("[{\"title\":\"T\"}]" :: Text)]
+                                    ]
+                             ]
+                       ]
+                   ]
+            ]
+        )
+        `shouldBe` Just "[{\"title\":\"T\"}]"
+
+    it "concatenates multiple non-thought text parts" $
+      extractText
+        ( object
+            [ "candidates"
+                .= [ object
+                       [ "content"
+                           .= object
+                             [ "parts"
+                                 .= [ object ["text" .= ("hello " :: Text)],
+                                      object ["text" .= ("world" :: Text)]
+                                    ]
+                             ]
+                       ]
+                   ]
+            ]
+        )
+        `shouldBe` Just "hello world"
+
+    it "returns Nothing when all parts are thought parts" $
+      extractText
+        ( object
+            [ "candidates"
+                .= [ object
+                       [ "content"
+                           .= object
+                             [ "parts"
+                                 .= [ object ["text" .= ("thinking..." :: Text), "thought" .= True]
+                                    ]
+                             ]
+                       ]
+                   ]
+            ]
+        )
+        `shouldBe` Nothing
+
+    it "skips non-text parts (e.g. functionCall) and returns the text part" $
+      extractText
+        ( object
+            [ "candidates"
+                .= [ object
+                       [ "content"
+                           .= object
+                             [ "parts"
+                                 .= [ object ["functionCall" .= object ["name" .= ("google_search" :: Text)]],
+                                      object ["text" .= ("result text" :: Text)]
+                                    ]
+                             ]
+                       ]
+                   ]
+            ]
+        )
+        `shouldBe` Just "result text"
+
+  describe "extractFinishReason" $ do
+    it "returns the finishReason from the first candidate" $
+      extractFinishReason
+        ( object
+            [ "candidates"
+                .= [ object ["finishReason" .= ("RECITATION" :: Text)]
+                   ]
+            ]
+        )
+        `shouldBe` Just "RECITATION"
+
+    it "returns Nothing when there are no candidates" $
+      extractFinishReason (object ["candidates" .= ([] :: [Value])])
+        `shouldBe` Nothing
+
+    it "returns Nothing when finishReason is absent from the candidate" $
+      extractFinishReason (geminiResponse "hi")
+        `shouldBe` Nothing
+
   describe "splitTitle" $ do
     it "strips the leading # and whitespace from an H1 heading" $ do
       let (title, _) = splitTitle "# My Post Title\nBody here."

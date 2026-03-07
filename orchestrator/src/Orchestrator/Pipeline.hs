@@ -113,20 +113,17 @@ reloadPendingReviews env@PipelineEnv {..} = do
               bodyPtBr = fromMaybe "" (postDraftContentMarkdownPtBr pd)
               tags = unTagList (postDraftSuggestedTags pd)
               createdAt = postDraftCreatedAt pd
-          ptBrRef <- newIORef bodyPtBr
           let rr =
                 ReviewRequest
                   { rrTitle = postDraftTitle pd,
                     rrBodyEn = bodyEn,
+                    rrBodyPtBr = bodyPtBr,
                     rrTags = tags,
-                    rrRevise = \currentBodyEn feedback -> do
-                      currentBodyPtBr <- readIORef ptBrRef
+                    rrRevise = \currentBodyEn currentBodyPtBr feedback -> do
                       revisedDraft <- reviseDraft pipeAiCfg currentBodyEn currentBodyPtBr feedback
-                      writeIORef ptBrRef (gdBodyPtBr revisedDraft)
                       recordRevision env pdKey revisedDraft
-                      pure (gdBodyEn revisedDraft, gdTags revisedDraft),
-                    rrApprove = \finalBodyEn finalTags -> do
-                      finalBodyPtBr <- readIORef ptBrRef
+                      pure (gdBodyEn revisedDraft, gdBodyPtBr revisedDraft, gdTags revisedDraft),
+                    rrApprove = \finalBodyEn finalBodyPtBr finalTags ->
                       publishDraft env rcKey pdKey createdAt finalBodyEn finalBodyPtBr finalTags,
                     rrReject = rejectDraft env rcKey pdKey,
                     rrOnUserMessage = insertComment env pdKey CommentAuthorUser,
@@ -167,31 +164,28 @@ mkReviewRequest ::
   GeneratedDraft ->
   IO ReviewRequest
 mkReviewRequest env rcKey createdAt draft = do
-  ptBrRef <- newIORef (gdBodyPtBr draft)
   postDraftKeyRef <- newIORef Nothing
   pure
     ReviewRequest
       { rrTitle = gdTitle draft,
         rrBodyEn = gdBodyEn draft,
+        rrBodyPtBr = gdBodyPtBr draft,
         rrTags = gdTags draft,
-        rrRevise = revise ptBrRef postDraftKeyRef,
-        rrApprove = approve ptBrRef postDraftKeyRef,
+        rrRevise = revise postDraftKeyRef,
+        rrApprove = approve postDraftKeyRef,
         rrReject = reject' postDraftKeyRef,
         rrOnUserMessage = onUserMsg postDraftKeyRef,
         rrOnBotMessage = onBotMsg postDraftKeyRef,
         rrOnThreadCreated = onThreadCreated postDraftKeyRef
       }
   where
-    revise ptBrRef postDraftKeyRef currentBodyEn feedback =
+    revise postDraftKeyRef currentBodyEn currentBodyPtBr feedback =
       withPostDraftKey postDraftKeyRef $ \pdKey -> do
-        currentBodyPtBr <- readIORef ptBrRef
         revisedDraft <- reviseDraft (pipeAiCfg env) currentBodyEn currentBodyPtBr feedback
-        writeIORef ptBrRef (gdBodyPtBr revisedDraft)
         recordRevision env pdKey revisedDraft
-        pure (gdBodyEn revisedDraft, gdTags revisedDraft)
-    approve ptBrRef postDraftKeyRef finalBodyEn tags =
-      withPostDraftKey postDraftKeyRef $ \pdKey -> do
-        finalBodyPtBr <- readIORef ptBrRef
+        pure (gdBodyEn revisedDraft, gdBodyPtBr revisedDraft, gdTags revisedDraft)
+    approve postDraftKeyRef finalBodyEn finalBodyPtBr tags =
+      withPostDraftKey postDraftKeyRef $ \pdKey ->
         publishDraft env rcKey pdKey createdAt finalBodyEn finalBodyPtBr tags
     reject' postDraftKeyRef reason =
       withPostDraftKey postDraftKeyRef $ \pdKey ->

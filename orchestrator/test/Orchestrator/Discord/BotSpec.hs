@@ -13,6 +13,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Discord.Types (ChannelId, DiscordId (..), Snowflake (..))
 import Orchestrator.Discord.Bot
+import Orchestrator.TextUtils (emojiReject)
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -32,11 +33,13 @@ simulateDrain :: DiscordConfig -> Text -> IO PendingReview
 simulateDrain cfg key = do
   req <- takeMVar (dcSendQueue cfg)
   bodyEnVar <- newTVarIO (rrBodyEn req)
+  bodyPtBrVar <- newTVarIO (rrBodyPtBr req)
   tagsVar <- newTVarIO (rrTags req)
   let pr =
         PendingReview
           { prTitle = rrTitle req,
             prCurrentBodyEn = bodyEnVar,
+            prCurrentBodyPtBr = bodyPtBrVar,
             prCurrentTags = tagsVar,
             prKey = key,
             prThreadId = testThreadId,
@@ -80,13 +83,16 @@ simulateThreadMessage cfg key content = do
         then do
           atomically $ modifyTVar' (dcReviewMap cfg) (Map.delete key)
           body <- readTVarIO (prCurrentBodyEn pr)
+          bodyPtBr <- readTVarIO (prCurrentBodyPtBr pr)
           tags <- readTVarIO (prCurrentTags pr)
-          prApprove pr body tags
+          prApprove pr body bodyPtBr tags
         else do
           currentBody <- readTVarIO (prCurrentBodyEn pr)
-          (newBody, newTags) <- prRevise pr currentBody content
+          currentBodyPtBr <- readTVarIO (prCurrentBodyPtBr pr)
+          (newBody, newBodyPtBr, newTags) <- prRevise pr currentBody currentBodyPtBr content
           atomically $ do
             writeTVar (prCurrentBodyEn pr) newBody
+            writeTVar (prCurrentBodyPtBr pr) newBodyPtBr
             writeTVar (prCurrentTags pr) newTags
           prOnBotMessage pr newBody
 
@@ -124,7 +130,7 @@ spec = do
   describe "registerForReview" $ do
     it "queues the request with the correct title and body" $ do
       cfg <- mkDiscordConfig "token" 1 2
-      registerForReview cfg ReviewRequest {rrTitle = "My Title", rrBodyEn = "My Body", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \_ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "My Title", rrBodyEn = "My Body", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("", "", []), rrApprove = \_ _ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       req <- takeMVar (dcSendQueue cfg)
       rrTitle req `shouldBe` "My Title"
       rrBodyEn req `shouldBe` "My Body"
@@ -132,37 +138,39 @@ spec = do
     it "fires the approve callback with the current body when \x2705 is received" $ do
       cfg <- mkDiscordConfig "token" 1 2
       result <- newIORef ("" :: Text)
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "original-body", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \body _tags -> writeIORef result body, rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "original-body", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("", "", []), rrApprove = \body _ptbr _tags -> writeIORef result body, rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-1"
       Just pr' <- simulateReaction cfg "key-1"
       do
         body <- readTVarIO (prCurrentBodyEn pr')
+        bodyPtBr <- readTVarIO (prCurrentBodyPtBr pr')
         tags <- readTVarIO (prCurrentTags pr')
-        prApprove pr' body tags
+        prApprove pr' body bodyPtBr tags
       readIORef result `shouldReturn` "original-body"
 
     it "fires the reject callback with the emoji when \x274c is received" $ do
       cfg <- mkDiscordConfig "token" 1 2
       rejectRef <- newIORef ("" :: Text)
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "B", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \_ _ -> pure (), rrReject = writeIORef rejectRef, rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "B", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("", "", []), rrApprove = \_ _ _ -> pure (), rrReject = writeIORef rejectRef, rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-2"
       Just pr <- simulateReaction cfg "key-2"
-      prReject pr "\x274c"
-      readIORef rejectRef `shouldReturn` "\x274c"
+      prReject pr emojiReject
+      readIORef rejectRef `shouldReturn` emojiReject
 
     it "removes both map entries before firing the approve callback" $ do
       cfg <- mkDiscordConfig "token" 1 2
       mapSizeRef <- newIORef (-1 :: Int)
-      let onApprove _ _ = do
+      let onApprove _ _ _ = do
             rm <- readTVarIO (dcReviewMap cfg)
             writeIORef mapSizeRef (Map.size rm)
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "B", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = onApprove, rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "B", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("", "", []), rrApprove = onApprove, rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-3"
       Just pr <- simulateReaction cfg "key-3"
       do
         body <- readTVarIO (prCurrentBodyEn pr)
+        bodyPtBr <- readTVarIO (prCurrentBodyPtBr pr)
         tags <- readTVarIO (prCurrentTags pr)
-        prApprove pr body tags
+        prApprove pr body bodyPtBr tags
       readIORef mapSizeRef `shouldReturn` 0
 
     it "handles two concurrent reviews independently" $ do
@@ -171,35 +179,36 @@ spec = do
       resultB <- newIORef ("" :: Text)
       registerForReview
         cfg
-        ReviewRequest {rrTitle = "A", rrBodyEn = "bodyA", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \body _tags -> writeIORef resultA body, rrReject = \_ -> writeIORef resultA "rejected", rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
+        ReviewRequest {rrTitle = "A", rrBodyEn = "bodyA", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("", "", []), rrApprove = \body _ptbr _tags -> writeIORef resultA body, rrReject = \_ -> writeIORef resultA "rejected", rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       prA <- simulateDrain cfg "key-A"
       registerForReview
         cfg
-        ReviewRequest {rrTitle = "B", rrBodyEn = "bodyB", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \body _tags -> writeIORef resultB body, rrReject = writeIORef resultB, rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
+        ReviewRequest {rrTitle = "B", rrBodyEn = "bodyB", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("", "", []), rrApprove = \body _ptbr _tags -> writeIORef resultB body, rrReject = writeIORef resultB, rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       prB <- simulateDrain cfg "key-B"
       Just _ <- simulateReaction cfg "key-A"
       Just _ <- simulateReaction cfg "key-B"
       do
         body <- readTVarIO (prCurrentBodyEn prA)
+        bodyPtBr <- readTVarIO (prCurrentBodyPtBr prA)
         tags <- readTVarIO (prCurrentTags prA)
-        prApprove prA body tags
-      prReject prB "\x274c"
+        prApprove prA body bodyPtBr tags
+      prReject prB emojiReject
       readIORef resultA `shouldReturn` "bodyA"
-      readIORef resultB `shouldReturn` "\x274c"
+      readIORef resultB `shouldReturn` emojiReject
 
   describe "thread message flow" $ do
     it "calls the revise function with current body and feedback" $ do
       cfg <- mkDiscordConfig "token" 1 2
       revCount <- newIORef (0 :: Int)
-      let revise _body _feedback = modifyIORef revCount (+ 1) >> pure ("revised", [])
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "initial", rrTags = [], rrRevise = revise, rrApprove = \_ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
+      let revise _body _ptbr _feedback = modifyIORef revCount (+ 1) >> pure ("revised", "", [])
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "initial", rrBodyPtBr = "", rrTags = [], rrRevise = revise, rrApprove = \_ _ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-r1"
       simulateThreadMessage cfg "key-r1" "please add more examples"
       readIORef revCount `shouldReturn` 1
 
     it "updates the current body after a revision" $ do
       cfg <- mkDiscordConfig "token" 1 2
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "initial", rrTags = [], rrRevise = \_ _ -> pure ("revised", []), rrApprove = \_ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "initial", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("revised", "", []), rrApprove = \_ _ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       pr <- simulateDrain cfg "key-r2"
       simulateThreadMessage cfg "key-r2" "make it shorter"
       readTVarIO (prCurrentBodyEn pr) `shouldReturn` "revised"
@@ -208,7 +217,7 @@ spec = do
       cfg <- mkDiscordConfig "token" 1 2
       result <- newIORef ("" :: Text)
       -- First revision changes body to "revised"; second approval should fire with "revised".
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "initial", rrTags = [], rrRevise = \_ _ -> pure ("revised", []), rrApprove = \body _tags -> writeIORef result body, rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "initial", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("revised", "", []), rrApprove = \body _ptbr _tags -> writeIORef result body, rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-ap"
       simulateThreadMessage cfg "key-ap" "add examples"
       simulateThreadMessage cfg "key-ap" "publish"
@@ -216,7 +225,7 @@ spec = do
 
     it "removes both maps when approved via thread message" $ do
       cfg <- mkDiscordConfig "token" 1 2
-      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "B", rrTags = [], rrRevise = \_ _ -> pure ("", []), rrApprove = \_ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
+      registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "B", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("", "", []), rrApprove = \_ _ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-cl"
       simulateThreadMessage cfg "key-cl" "looks good"
       rm <- readTVarIO (dcReviewMap cfg)
@@ -230,9 +239,10 @@ spec = do
         ReviewRequest
           { rrTitle = "T",
             rrBodyEn = "B",
+            rrBodyPtBr = "",
             rrTags = [],
-            rrRevise = \_ _ -> pure ("", []),
-            rrApprove = \_ _ -> pure (),
+            rrRevise = \_ _ _ -> pure ("", "", []),
+            rrApprove = \_ _ _ -> pure (),
             rrReject = \_ -> pure (),
             rrOnThreadCreated = writeIORef calledWith,
             rrOnUserMessage = \_ -> pure (),
@@ -249,9 +259,10 @@ spec = do
         ReviewRequest
           { rrTitle = "T",
             rrBodyEn = "initial",
+            rrBodyPtBr = "",
             rrTags = [],
-            rrRevise = \_ _ -> pure ("revised", []),
-            rrApprove = \_ _ -> pure (),
+            rrRevise = \_ _ _ -> pure ("revised", "", []),
+            rrApprove = \_ _ _ -> pure (),
             rrReject = \_ -> pure (),
             rrOnThreadCreated = \_ -> pure (),
             rrOnUserMessage = \m -> modifyIORef msgs (<> [m]),
@@ -269,9 +280,10 @@ spec = do
         ReviewRequest
           { rrTitle = "T",
             rrBodyEn = "B",
+            rrBodyPtBr = "",
             rrTags = [],
-            rrRevise = \_ _ -> pure ("", []),
-            rrApprove = \_ _ -> pure (),
+            rrRevise = \_ _ _ -> pure ("", "", []),
+            rrApprove = \_ _ _ -> pure (),
             rrReject = \_ -> pure (),
             rrOnThreadCreated = \_ -> pure (),
             rrOnUserMessage = \m -> modifyIORef msgs (<> [m]),
@@ -289,9 +301,10 @@ spec = do
         ReviewRequest
           { rrTitle = "T",
             rrBodyEn = "initial",
+            rrBodyPtBr = "",
             rrTags = [],
-            rrRevise = \_ _ -> pure ("revised-body", []),
-            rrApprove = \_ _ -> pure (),
+            rrRevise = \_ _ _ -> pure ("revised-body", "", []),
+            rrApprove = \_ _ _ -> pure (),
             rrReject = \_ -> pure (),
             rrOnThreadCreated = \_ -> pure (),
             rrOnUserMessage = \_ -> pure (),
@@ -305,17 +318,18 @@ spec = do
       cfg <- mkDiscordConfig "token" 1 2
       botMsgs <- newIORef ([] :: [Text])
       counter <- newIORef (0 :: Int)
-      let revise _ _ = do
+      let revise _ _ _ = do
             n <- modifyIORef counter (+ 1) >> readIORef counter
-            pure ("rev-" <> T.pack (show n), [])
+            pure ("rev-" <> T.pack (show n), "", [])
       registerForReview
         cfg
         ReviewRequest
           { rrTitle = "T",
             rrBodyEn = "initial",
+            rrBodyPtBr = "",
             rrTags = [],
             rrRevise = revise,
-            rrApprove = \_ _ -> pure (),
+            rrApprove = \_ _ _ -> pure (),
             rrReject = \_ -> pure (),
             rrOnThreadCreated = \_ -> pure (),
             rrOnUserMessage = \_ -> pure (),
@@ -334,9 +348,10 @@ spec = do
         ReviewRequest
           { rrTitle = "T",
             rrBodyEn = "B",
+            rrBodyPtBr = "",
             rrTags = [],
-            rrRevise = \_ _ -> pure ("", []),
-            rrApprove = \_ _ -> pure (),
+            rrRevise = \_ _ _ -> pure ("", "", []),
+            rrApprove = \_ _ _ -> pure (),
             rrReject = \_ -> pure (),
             rrOnThreadCreated = \_ -> pure (),
             rrOnUserMessage = \_ -> pure (),

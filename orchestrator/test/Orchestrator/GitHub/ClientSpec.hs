@@ -22,6 +22,7 @@ import Network.HTTP.Client (Manager, defaultManagerSettings, newManager)
 import qualified Network.Socket as NS
 import qualified Network.Socket.ByteString as NSB
 import Orchestrator.GitHub.Client
+import Orchestrator.TextUtils (emojiDraft)
 import Test.Hspec
 
 spec :: Spec
@@ -68,7 +69,7 @@ spec = do
 
     it "sets the commit message from the post title" $ do
       let body = buildCommitBody (req "main" "Beyond OOP" "my-post.md" "body" Nothing)
-      getField "message" body `shouldBe` Just ("\x1F4DD Post: Beyond OOP" :: Text)
+      getField "message" body `shouldBe` Just (emojiDraft <> " Post: Beyond OOP")
 
     it "sets the branch from the first argument" $ do
       let body = buildCommitBody (req "gh-pages" "Title" "p.md" "body" Nothing)

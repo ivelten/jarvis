@@ -27,7 +27,7 @@ import Data.Text.Encoding (encodeUtf8)
 import Discord
 import Discord.Requests (ChannelRequest (..), MessageDetailedOpts (..), StartThreadForumMediaMessage (..), StartThreadForumMediaOpts (..), StartThreadOpts (..))
 import Discord.Types
-import Orchestrator.TextUtils (truncateText)
+import Orchestrator.TextUtils (emojiApprove, emojiDraft, emojiReject, emojiRevise, emojiWarning, truncateText)
 import Text.Read (readMaybe)
 
 -- ---------------------------------------------------------------------------
@@ -40,6 +40,8 @@ data PendingReview = PendingReview
     prTitle :: !Text,
     -- | Current English draft body; updated atomically after each AI revision.
     prCurrentBodyEn :: !(TVar Text),
+    -- | Current Brazilian Portuguese draft body; updated atomically after each AI revision.
+    prCurrentBodyPtBr :: !(TVar Text),
     -- | Current tags; updated atomically alongside the body after each revision.
     prCurrentTags :: !(TVar [Text]),
     -- | Lookup key: forum thread Snowflake as text.  Because in a forum
@@ -48,10 +50,10 @@ data PendingReview = PendingReview
     prKey :: !Text,
     -- | Thread 'ChannelId' for posting revision replies.
     prThreadId :: !ChannelId,
-    -- | @(currentBodyEn, feedback) -> (revisedBodyEn, revisedTags)@.
-    prRevise :: Text -> Text -> IO (Text, [Text]),
-    -- | Called with the final body and tags when ✅ is received or an approval phrase is typed.
-    prApprove :: Text -> [Text] -> IO (),
+    -- | @(currentBodyEn, currentBodyPtBr, feedback) -> (revisedBodyEn, revisedBodyPtBr, revisedTags)@.
+    prRevise :: Text -> Text -> Text -> IO (Text, Text, [Text]),
+    -- | Called with the final bodies and tags when ✅ is received or an approval phrase is typed.
+    prApprove :: Text -> Text -> [Text] -> IO (),
     -- | Called with the rejection reason when ❌ is received.
     prReject :: Text -> IO (),
     -- | Called with the text of each message the human reviewer sends.
@@ -67,12 +69,14 @@ data ReviewRequest = ReviewRequest
     rrTitle :: !Text,
     -- | Full English Markdown draft body.
     rrBodyEn :: !Text,
+    -- | Full Brazilian Portuguese Markdown draft body.
+    rrBodyPtBr :: !Text,
     -- | Initial tags from the draft; kept in sync with the body after revisions.
     rrTags :: ![Text],
-    -- | @(currentBodyEn, feedback) -> (revisedBodyEn, revisedTags)@.
-    rrRevise :: Text -> Text -> IO (Text, [Text]),
-    -- | Called with the final body and tags when the reviewer approves.
-    rrApprove :: Text -> [Text] -> IO (),
+    -- | @(currentBodyEn, currentBodyPtBr, feedback) -> (revisedBodyEn, revisedBodyPtBr, revisedTags)@.
+    rrRevise :: Text -> Text -> Text -> IO (Text, Text, [Text]),
+    -- | Called with the final bodies and tags when the reviewer approves.
+    rrApprove :: Text -> Text -> [Text] -> IO (),
     -- | Called with the rejection reason when rejected.
     rrReject :: Text -> IO (),
     -- | Called with the text of each message the human reviewer sends in the thread.
@@ -188,47 +192,26 @@ drainQueue hdl cfg = forever $ do
     Left ex -> putStrLn $ "[Discord] drainQueue exception: " <> displayException ex
     Right () -> pure ()
 
--- | Create the forum thread, post the draft, and register the pending review.
+-- | Orchestrate the full review flow: create thread, persist, then activate.
 processReview :: DiscordHandle -> DiscordConfig -> ReviewRequest -> IO ()
-processReview hdl cfg ReviewRequest {..} = do
-  threadResult <- runReaderT (restCall (StartThreadForumMedia chanId forumOpts)) hdl
-  case threadResult of
-    Left err -> ioError . userError $ "failed to create forum thread: " <> show err
-    Right thread -> do
-      let tid = channelId thread
-          key = showId tid
-          starterMsgId = DiscordId (unId tid) :: MessageId
-      putStrLn $ "[Discord] Thread created (tid=" <> T.unpack key <> "), running on-created callback..."
-      persistResult <- try (rrOnThreadCreated key) :: IO (Either SomeException ())
-      case persistResult of
-        Left ex ->
-          putStrLn $ "[Discord] ERROR: on-thread-created callback failed; draft not persisted: " <> displayException ex
-        Right () -> do
-          putStrLn "[Discord] Draft persisted. Posting draft body to thread..."
-          tryLog "[Discord] ERROR: failed to post draft body" $
-            postAsFile hdl tid (emojiDraft <> " **Draft:**") rrBodyEn
-          threadDelay 2_000_000
-          bodyEnVar <- newTVarIO rrBodyEn
-          tagsVar <- newTVarIO rrTags
-          let pr =
-                PendingReview
-                  { prTitle = rrTitle,
-                    prCurrentBodyEn = bodyEnVar,
-                    prCurrentTags = tagsVar,
-                    prKey = key,
-                    prThreadId = tid,
-                    prRevise = rrRevise,
-                    prApprove = rrApprove,
-                    prReject = rrReject,
-                    prOnUserMessage = rrOnUserMessage,
-                    prOnBotMessage = rrOnBotMessage
-                  }
-          atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert key pr)
-          tryLog "[Discord] WARNING: failed to add approve reaction" $
-            restCallIO hdl (CreateReaction (tid, starterMsgId) emojiApprove)
-          tryLog "[Discord] WARNING: failed to add reject reaction" $
-            restCallIO hdl (CreateReaction (tid, starterMsgId) emojiReject)
-          putStrLn "[Discord] Review setup complete."
+processReview hdl cfg rr@ReviewRequest {..} = do
+  thread <- createReviewThread hdl cfg rr
+  let tid = channelId thread
+      key = showId tid
+      starterMsgId = DiscordId (unId tid) :: MessageId
+  putStrLn $ "[Discord] Thread created (tid=" <> T.unpack key <> "), running on-created callback..."
+  persistResult <- try (rrOnThreadCreated key) :: IO (Either SomeException ())
+  case persistResult of
+    Left ex ->
+      putStrLn $ "[Discord] ERROR: on-thread-created callback failed; draft not persisted: " <> displayException ex
+    Right () ->
+      activateReview hdl cfg rr tid key starterMsgId
+
+-- | Create the forum thread. Throws 'IOError' if the Discord API call fails.
+createReviewThread :: DiscordHandle -> DiscordConfig -> ReviewRequest -> IO Channel
+createReviewThread hdl cfg ReviewRequest {..} =
+  runReaderT (restCall (StartThreadForumMedia chanId forumOpts)) hdl
+    >>= either (ioError . userError . ("failed to create forum thread: " <>) . show) pure
   where
     chanId = mkChannelId (dcChannelId cfg)
     embed =
@@ -252,6 +235,44 @@ processReview hdl cfg ReviewRequest {..} = do
           startThreadForumMediaMessage = forumMsg,
           startThreadForumMediaAppliedTags = Nothing
         }
+
+-- | Allocate mutable state and build a 'PendingReview' value.
+buildPendingReview :: Text -> ChannelId -> ReviewRequest -> IO PendingReview
+buildPendingReview key tid ReviewRequest {..} = do
+  bodyEnVar <- newTVarIO rrBodyEn
+  bodyPtBrVar <- newTVarIO rrBodyPtBr
+  tagsVar <- newTVarIO rrTags
+  pure
+    PendingReview
+      { prTitle = rrTitle,
+        prCurrentBodyEn = bodyEnVar,
+        prCurrentBodyPtBr = bodyPtBrVar,
+        prCurrentTags = tagsVar,
+        prKey = key,
+        prThreadId = tid,
+        prRevise = rrRevise,
+        prApprove = rrApprove,
+        prReject = rrReject,
+        prOnUserMessage = rrOnUserMessage,
+        prOnBotMessage = rrOnBotMessage
+      }
+
+-- | Post draft files, register the pending review, and add emoji reactions.
+activateReview :: DiscordHandle -> DiscordConfig -> ReviewRequest -> ChannelId -> Text -> MessageId -> IO ()
+activateReview hdl cfg rr tid key starterMsgId = do
+  putStrLn "[Discord] Draft persisted. Posting draft bodies to thread..."
+  tryLog "[Discord] ERROR: failed to post EN draft" $
+    postAsFile hdl tid (emojiDraft <> " **Draft (EN):**") "draft-en.md" (rrBodyEn rr)
+  tryLog "[Discord] ERROR: failed to post PT-BR draft" $
+    postAsFile hdl tid (emojiDraft <> " **Draft (PT-BR):**") "draft-pt-br.md" (rrBodyPtBr rr)
+  threadDelay 2_000_000
+  pr <- buildPendingReview key tid rr
+  atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert key pr)
+  tryLog "[Discord] WARNING: failed to add approve reaction" $
+    restCallIO hdl (CreateReaction (tid, starterMsgId) emojiApprove)
+  tryLog "[Discord] WARNING: failed to add reject reaction" $
+    restCallIO hdl (CreateReaction (tid, starterMsgId) emojiReject)
+  putStrLn "[Discord] Review setup complete."
 
 -- | Handle incoming Discord events.
 --
@@ -316,7 +337,8 @@ handleRevision pr feedback = do
       prOnUserMessage pr feedback
   reviseResult <- liftIO $ do
     currentBodyEn <- readTVarIO (prCurrentBodyEn pr)
-    try (prRevise pr currentBodyEn feedback) :: IO (Either SomeException (Text, [Text]))
+    currentBodyPtBr <- readTVarIO (prCurrentBodyPtBr pr)
+    try (prRevise pr currentBodyEn currentBodyPtBr feedback) :: IO (Either SomeException (Text, Text, [Text]))
   case reviseResult of
     Left ex -> do
       let errMsg = "Could not revise draft: " <> T.pack (displayException ex)
@@ -325,17 +347,20 @@ handleRevision pr feedback = do
       case sendResult of
         Left e -> liftIO $ putStrLn $ "[Discord] WARNING: also failed to send error message to thread: " <> show e
         Right _ -> pure ()
-    Right (newBodyEn, newTags) -> do
+    Right (newBodyEn, newBodyPtBr, newTags) -> do
       liftIO $ atomically $ do
         writeTVar (prCurrentBodyEn pr) newBodyEn
+        writeTVar (prCurrentBodyPtBr pr) newBodyPtBr
         writeTVar (prCurrentTags pr) newTags
       liftIO $
         tryLog "[Discord] WARNING: failed to record bot message" $
           prOnBotMessage pr newBodyEn
       hdl <- ask
-      liftIO $
-        tryLog "[Discord] ERROR: failed to post revised draft to thread" $
-          postAsFile hdl (prThreadId pr) (emojiRevise <> " **Revised draft:**") newBodyEn
+      liftIO $ do
+        tryLog "[Discord] ERROR: failed to post revised EN draft" $
+          postAsFile hdl (prThreadId pr) (emojiRevise <> " **Revised draft (EN):**") "draft-en.md" newBodyEn
+        tryLog "[Discord] ERROR: failed to post revised PT-BR draft" $
+          postAsFile hdl (prThreadId pr) (emojiRevise <> " **Revised draft (PT-BR):**") "draft-pt-br.md" newBodyPtBr
 
 -- ---------------------------------------------------------------------------
 -- Utilities
@@ -358,11 +383,13 @@ restoreReview cfg tidText ReviewRequest {..} =
     Just n -> do
       let tid = DiscordId (Snowflake (fromIntegral n)) :: ChannelId
       bodyEnVar <- newTVarIO rrBodyEn
+      bodyPtBrVar <- newTVarIO rrBodyPtBr
       tagsVar <- newTVarIO rrTags
       let pr =
             PendingReview
               { prTitle = rrTitle,
                 prCurrentBodyEn = bodyEnVar,
+                prCurrentBodyPtBr = bodyPtBrVar,
                 prCurrentTags = tagsVar,
                 prKey = tidText,
                 prThreadId = tid,
@@ -411,8 +438,9 @@ fireApproval :: PendingReview -> Text -> IO ()
 fireApproval pr trigger = do
   prOnUserMessage pr trigger
   bodyEn <- readTVarIO (prCurrentBodyEn pr)
+  bodyPtBr <- readTVarIO (prCurrentBodyPtBr pr)
   tags <- readTVarIO (prCurrentTags pr)
-  prApprove pr bodyEn tags
+  prApprove pr bodyEn bodyPtBr tags
 
 -- | Record the trigger text as a user comment and fire the reject callback.
 fireRejection :: PendingReview -> Text -> IO ()
@@ -424,30 +452,23 @@ fireRejection pr trigger = do
 restCallIO :: (FromJSON a) => DiscordHandle -> ChannelRequest a -> IO ()
 restCallIO hdl req = void $ runReaderT (restCall req) hdl
 
--- Discord emoji constants -------------------------------------------------
-
-emojiApprove, emojiReject, emojiDraft, emojiRevise, emojiWarning :: Text
-emojiApprove = "\x2705" -- ✅
-emojiReject = "\x274c" -- ❌
-emojiDraft = "\x1f4dd" -- 📝
-emojiRevise = "\x270f\xfe0f" -- ✏️
-emojiWarning = "\x26a0\xfe0f" -- ⚠️
-
--- | Post a draft body to a Discord channel as a @draft.md@ file attachment.
+-- | Post a draft body to a Discord channel as a named file attachment.
 -- This avoids Discord's 2000-character message limit entirely and keeps the
 -- draft in a single, easily downloadable message.
-postAsFile :: DiscordHandle -> ChannelId -> Text -> Text -> IO ()
-postAsFile hdl tid caption body = do
+postAsFile :: DiscordHandle -> ChannelId -> Text -> Text -> Text -> IO ()
+postAsFile hdl tid caption filename body = do
   putStrLn $
-    "[Discord] Posting draft as file attachment ("
+    "[Discord] Posting "
+      <> T.unpack filename
+      <> " as file attachment ("
       <> show (T.length body)
       <> " chars)."
   let opts =
         def
           { messageDetailedContent = caption,
-            messageDetailedFile = Just ("draft.md", encodeUtf8 body)
+            messageDetailedFile = Just (filename, encodeUtf8 body)
           }
   result <- runReaderT (restCall (CreateMessageDetailed tid opts)) hdl
   case result of
     Left err -> putStrLn $ "[Discord] Failed to post file attachment: " <> show err
-    Right _ -> putStrLn "[Discord] Draft posted as file attachment."
+    Right _ -> putStrLn $ "[Discord] Posted " <> T.unpack filename <> "."

@@ -2,6 +2,11 @@ module Orchestrator.TextUtils
   ( truncateText,
     splitTitle,
     toSlug,
+    emojiApprove,
+    emojiDraft,
+    emojiReject,
+    emojiRevise,
+    emojiWarning,
   )
 where
 
@@ -47,3 +52,13 @@ toSlug =
     . filter (not . T.null)
     . T.splitOn " "
     . T.map (\c -> if isAlphaNum c || c == ' ' then toLower c else ' ')
+
+-- Discord emoji constants --------------------------------------------------
+
+-- | Unicode emoji constants for use in Discord messages and reactions.
+emojiApprove, emojiReject, emojiDraft, emojiRevise, emojiWarning :: Text
+emojiApprove = "\x2705" -- ✅
+emojiReject = "\x274c" -- ❌
+emojiDraft = "\x1f4dd" -- 📝
+emojiRevise = "\x270f\xfe0f" -- ✏️
+emojiWarning = "\x26a0\xfe0f" -- ⚠️

@@ -9,6 +9,7 @@ module Orchestrator.AI.Client
     generateDraft,
     reviseDraft,
     extractText,
+    extractFinishReason,
     extractTokenCount,
     extractGroundingChunks,
     resolveRedirectUrl,
@@ -197,7 +198,10 @@ callGemini cfg body = do
     Right v -> do
       checkGeminiError v
       case extractText v of
-        Nothing -> ioError (userError "Gemini: could not extract text from response")
+        Nothing ->
+          ioError . userError $
+            "Gemini: could not extract text from response"
+              <> maybe "" (\r -> " (finishReason=" <> T.unpack r <> ")") (extractFinishReason v)
         Just txt -> pure (txt, extractTokenCount v)
 
 -- | Build a @contents@ array with a single user turn.
@@ -217,9 +221,13 @@ extractTokenCount = fromMaybe 0 . parseMaybe go
       usage <- o .: "usageMetadata"
       usage .: "totalTokenCount"
 
--- | Extract the text payload from the first candidate's first part.
---   Gemini wraps generated content in:
---   @candidates[0].content.parts[0].text@
+-- | Extract the text payload from a Gemini response.
+--
+-- Concatenates all non-thought text parts from the first candidate.
+-- Gemini 2.5 thinking models prepend internal-reasoning parts tagged with
+-- @\"thought\": true@ before the actual response; those are skipped.
+-- When the candidate has no @content@ (e.g. @finishReason@ is @RECITATION@
+-- or @SAFETY@) the function returns 'Nothing'.
 extractText :: Value -> Maybe Text
 extractText = parseMaybe go
   where
@@ -230,9 +238,25 @@ extractText = parseMaybe go
         (c : _) -> do
           content <- c .: "content"
           parts <- content .: "parts"
-          case parts of
-            [] -> fail "no parts in Gemini candidate"
-            (p : _) -> p .: "text"
+          let textParts = mapMaybe (parseMaybe responseTextPart) parts
+          case textParts of
+            [] -> fail "no text parts in Gemini candidate"
+            ts -> pure (T.concat ts)
+    responseTextPart = withObject "part" $ \p -> do
+      isThought <- p .:? "thought" .!= False
+      if isThought
+        then fail "thought part"
+        else p .: "text"
+
+-- | Extract the @finishReason@ of the first candidate, if present.
+extractFinishReason :: Value -> Maybe Text
+extractFinishReason = parseMaybe go
+  where
+    go = withObject "GeminiResponse" $ \o -> do
+      candidates <- o .: "candidates"
+      case candidates of
+        [] -> fail "no candidates"
+        (c : _) -> c .: "finishReason"
 
 -- | Decode a UTF-8 text value as JSON, returning an @IO@ error on failure.
 decodeText :: (FromJSON a) => Text -> IO a

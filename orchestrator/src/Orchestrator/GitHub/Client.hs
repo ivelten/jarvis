@@ -19,6 +19,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.HTTP.Client
 import Network.HTTP.Types (RequestHeaders, status404, statusCode)
+import Orchestrator.TextUtils (emojiDraft)
 
 -- ---------------------------------------------------------------------------
 -- Types
@@ -120,7 +121,7 @@ buildCommitBody :: CommitRequest -> Value
 buildCommitBody CommitRequest {..} =
   let encodedContent = TE.decodeUtf8 . B64.encode . TE.encodeUtf8 $ crContent
       baseFields =
-        [ "message" .= ("\x1F4DD Post: " <> crTitle),
+        [ "message" .= (emojiDraft <> " Post: " <> crTitle),
           "content" .= encodedContent,
           "branch" .= crBranch
         ]
