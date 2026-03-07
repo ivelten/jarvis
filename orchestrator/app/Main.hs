@@ -2,7 +2,9 @@ module Main (main) where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception (SomeException, displayException, try)
+import Control.Monad (join)
 import qualified Data.ByteString.Char8 as BC
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -10,7 +12,7 @@ import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Orchestrator.AI.Client (AiConfig (..))
 import Orchestrator.Database.Connection (createPool, migrateDatabase)
-import Orchestrator.Discord.Bot (mkDiscordConfig, startBot)
+import Orchestrator.Discord.Bot (DiscordBotSettings (..), mkDiscordConfig, startBot)
 import Orchestrator.GitHub.Client (GitHubConfig (..), defaultApiBase)
 import Orchestrator.Pipeline (PipelineEnv (..), runDiscovery, runDraftGeneration)
 import System.Envy (FromEnv (..), decodeEnv, env, envMaybe)
@@ -48,6 +50,8 @@ data Config = Config
     cfgDcGuildId :: !Int,
     -- | Discord channel ID where draft review messages are posted.
     cfgDcChannelId :: !Int,
+    -- | Discord text channel ID used for slash commands and bot notices.
+    cfgDcInteractionChannelId :: !Int,
     -- | How often to run the discovery step, in seconds (default: 86400 = 1 day).
     cfgDiscoveryIntervalSecs :: !Int,
     -- | How often to run the draft-generation step, in seconds (default: 43200 = 12 hours).
@@ -69,6 +73,7 @@ instance FromEnv Config where
       <*> env "DISCORD_BOT_TOKEN"
       <*> env "DISCORD_GUILD_ID"
       <*> env "DISCORD_CHANNEL_ID"
+      <*> env "DISCORD_INTERACTION_CHANNEL_ID"
       <*> (fromMaybe 86400 <$> envMaybe "DISCOVERY_INTERVAL_SECS")
       <*> (fromMaybe 43200 <$> envMaybe "DRAFT_INTERVAL_SECS")
 
@@ -93,16 +98,17 @@ parseGeminiModels = filter (not . T.null) . map T.strip . T.splitOn ","
 sleepSecs :: Int -> IO ()
 sleepSecs n = threadDelay (n * 1_000_000)
 
--- | Run an action immediately, then repeat it on a fixed interval.
+-- | Sleep for @intervalSecs@, run an action, then repeat.
+-- The initial sleep means the workers do not fire immediately on startup.
 -- Exceptions are caught, logged with the given prefix, and the loop continues.
 scheduledLoop :: String -> Int -> IO () -> IO ()
 scheduledLoop prefix intervalSecs action = do
+  putStrLn $ prefix <> " Sleeping for " <> show intervalSecs <> "s."
+  sleepSecs intervalSecs
   result <- try action :: IO (Either SomeException ())
   case result of
     Left ex -> putStrLn $ prefix <> " Error: " <> displayException ex
     Right () -> pure ()
-  putStrLn $ prefix <> " Sleeping for " <> show intervalSecs <> "s."
-  sleepSecs intervalSecs
   scheduledLoop prefix intervalSecs action
 
 -- | Build an 'AiConfig' from the top-level config and a shared HTTP manager.
@@ -143,11 +149,22 @@ main = do
   let aiCfg = mkAiConfig cfg manager
       ghCfg = mkGhConfig cfg manager
 
+  -- IORef indirection to break the dcCfg <-> pipeEnv circular dependency.
+  -- The bot's slash-command callbacks read these refs at invocation time,
+  -- after the refs have been filled with the real pipeline actions below.
+  discoverRef <- newIORef (pure ())
+  draftRef <- newIORef (pure ())
+
   dcCfg <-
     mkDiscordConfig
-      (cfgDcBotToken cfg)
-      (fromIntegral (cfgDcGuildId cfg))
-      (fromIntegral (cfgDcChannelId cfg))
+      DiscordBotSettings
+        { dbsBotToken = cfgDcBotToken cfg,
+          dbsGuildId = fromIntegral (cfgDcGuildId cfg),
+          dbsChannelId = fromIntegral (cfgDcChannelId cfg),
+          dbsInteractionChannelId = fromIntegral (cfgDcInteractionChannelId cfg),
+          dbsOnDiscoverCommand = join (readIORef discoverRef),
+          dbsOnDraftCommand = join (readIORef draftRef)
+        }
 
   pool <- createPool (BC.pack (cfgDbUrl cfg))
   migrateDatabase pool
@@ -160,6 +177,9 @@ main = do
             pipeDcCfg = dcCfg,
             pipeDbPool = pool
           }
+
+  writeIORef discoverRef (runDiscovery pipeEnv)
+  writeIORef draftRef (runDraftGeneration pipeEnv)
 
   _ <-
     forkIO $

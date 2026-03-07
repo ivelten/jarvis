@@ -21,14 +21,21 @@ The orchestrator runs four parallel workers, each on its own independent schedul
 
 ```text
 main thread
-├── forkIO: Discovery worker  (default: every 24 h)
+├── forkIO: Discovery worker  (default: every 24 h, sleeps before first run)
 │     └── Gemini → PostgreSQL (raw_content)
-├── forkIO: Draft worker      (default: every 1 h)
+├── forkIO: Draft worker      (default: every 12 h, sleeps before first run)
 │     └── PostgreSQL → Gemini → Discord thread
 └── startBot (blocks main thread)
-      ├── MessageReactionAdd (✅ / ❌ on embed)
-      └── MessageCreate      (feedback / approvalphrase in thread)
+      ├── Ready               (registers /discover and /draft slash commands)
+      ├── InteractionCreate   (/discover or /draft in the commands channel)
+      ├── MessageReactionAdd  (✅ / ❌ on review embed)
+      └── MessageCreate       (feedback / approval phrase in thread)
 ```
+
+> **Note:** both background workers sleep for their full interval on startup before
+> running for the first time. This avoids a burst of AI calls every time the
+> process restarts. Use `/discover` or `/draft` in Discord to trigger an
+> immediate run instead.
 
 ### Review flow
 
@@ -70,11 +77,12 @@ React with **❌** at any point to reject the draft (it is removed from the queu
 3. On the same page, under **Privileged Gateway Intents**, enable:
    - ✅ **Message Content Intent**
    - ✅ **Server Members Intent**
-4. Open **OAuth2 → URL Generator**, set scopes to `bot`, and grant these permissions:
+4. Open **OAuth2 → URL Generator**, set scopes to `bot` **and** `applications.commands`, and grant these permissions:
    - Send Messages
    - Read Message History
    - Add Reactions
    - Create Public Threads
+   - Use Slash Commands
 5. Open the generated URL in a browser and invite the bot to your private Discord server.
 
 ### 2. Collect the Discord IDs
@@ -84,6 +92,8 @@ Enable **Developer Mode** in Discord: **Settings → Advanced → Developer Mode
 - Right-click your server icon → **Copy Server ID** → `DISCORD_GUILD_ID`
 - In your server, create a **Forum** channel (channel type: *Forum*) for reviews.
 - Right-click that forum channel → **Copy Channel ID** → `DISCORD_CHANNEL_ID`
+- Create a regular **Text** channel where you will type slash commands and receive bot notices.
+- Right-click that text channel → **Copy Channel ID** → `DISCORD_INTERACTION_CHANNEL_ID`
 
 ### 3. Get a Gemini API key
 
@@ -114,6 +124,7 @@ GEMINI_API_KEY=your-key-here
 DISCORD_BOT_TOKEN=your-token-here
 DISCORD_GUILD_ID=123456789012345678
 DISCORD_CHANNEL_ID=123456789012345678
+DISCORD_INTERACTION_CHANNEL_ID=123456789012345678
 ```
 
 The `DATABASE_URL` default (`postgresql://postgres:postgres@db:5432/jarvis`) already points to the devcontainer PostgreSQL service — no changes needed there.
@@ -145,6 +156,17 @@ The script loads `orchestrator/.env` automatically and starts the orchestrator v
 - Type feedback in the thread to request AI revisions.
 - When satisfied, type `publish` (or react ✅) to commit and deploy.
 
+### Slash commands
+
+Once the bot is running, two slash commands are registered in your guild and available in the interaction channel (`DISCORD_INTERACTION_CHANNEL_ID`):
+
+| Command | What it does |
+| --- | --- |
+| `/discover` | Immediately runs a content discovery cycle (Gemini → database). |
+| `/draft` | Immediately runs a draft-generation cycle (database → Gemini → Discord thread). |
+
+The bot replies with a confirmation message right away, then runs the pipeline in the background. Commands typed in any other channel are silently ignored.
+
 ## Configuration reference
 
 All configuration is read from environment variables. See `.env.example` for the full list with descriptions.
@@ -163,8 +185,9 @@ All configuration is read from environment variables. See `.env.example` for the
 | `DISCORD_BOT_TOKEN` | ✅ | — | Bot token (without `Bot` prefix) |
 | `DISCORD_GUILD_ID` | ✅ | — | Server (guild) ID |
 | `DISCORD_CHANNEL_ID` | ✅ | — | Forum channel ID for review threads |
-| `DISCOVERY_INTERVAL_SECS` | | `86400` | How often to discover new content (seconds) |
-| `DRAFT_INTERVAL_SECS` | | `43200` | How often to generate a new draft (seconds) |
+| `DISCORD_INTERACTION_CHANNEL_ID` | ✅ | — | Text channel ID for slash commands and bot notices (`/discover`, `/draft`) |
+| `DISCOVERY_INTERVAL_SECS` | | `86400` | Seconds to sleep between discovery runs (first run also delayed) |
+| `DRAFT_INTERVAL_SECS` | | `43200` | Seconds to sleep between draft-generation runs (first run also delayed) |
 
 ## Running the tests
 

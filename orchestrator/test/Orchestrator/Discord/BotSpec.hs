@@ -102,12 +102,12 @@ spec :: Spec
 spec = do
   describe "mkDiscordConfig" $ do
     it "creates a config with an empty send queue" $ do
-      cfg <- mkDiscordConfig "token" 123 456
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 123 456 789 (pure ()) (pure ()))
       isEmpty <- isEmptyMVar (dcSendQueue cfg)
       isEmpty `shouldBe` True
 
     it "creates a config with an empty review map" $ do
-      cfg <- mkDiscordConfig "token" 123 456
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 123 456 789 (pure ()) (pure ()))
       rm <- readTVarIO (dcReviewMap cfg)
       Map.size rm `shouldBe` 0
 
@@ -129,14 +129,14 @@ spec = do
 
   describe "registerForReview" $ do
     it "queues the request with the correct title and body" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       registerForReview cfg ReviewRequest {rrTitle = "My Title", rrBodyEn = "My Body", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("", "", []), rrApprove = \_ _ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       req <- takeMVar (dcSendQueue cfg)
       rrTitle req `shouldBe` "My Title"
       rrBodyEn req `shouldBe` "My Body"
 
     it "fires the approve callback with the current body when \x2705 is received" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       result <- newIORef ("" :: Text)
       registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "original-body", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("", "", []), rrApprove = \body _ptbr _tags -> writeIORef result body, rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-1"
@@ -149,7 +149,7 @@ spec = do
       readIORef result `shouldReturn` "original-body"
 
     it "fires the reject callback with the emoji when \x274c is received" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       rejectRef <- newIORef ("" :: Text)
       registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "B", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("", "", []), rrApprove = \_ _ _ -> pure (), rrReject = writeIORef rejectRef, rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-2"
@@ -158,7 +158,7 @@ spec = do
       readIORef rejectRef `shouldReturn` emojiReject
 
     it "removes both map entries before firing the approve callback" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       mapSizeRef <- newIORef (-1 :: Int)
       let onApprove _ _ _ = do
             rm <- readTVarIO (dcReviewMap cfg)
@@ -174,7 +174,7 @@ spec = do
       readIORef mapSizeRef `shouldReturn` 0
 
     it "handles two concurrent reviews independently" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       resultA <- newIORef ("" :: Text)
       resultB <- newIORef ("" :: Text)
       registerForReview
@@ -198,7 +198,7 @@ spec = do
 
   describe "thread message flow" $ do
     it "calls the revise function with current body and feedback" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       revCount <- newIORef (0 :: Int)
       let revise _body _ptbr _feedback = modifyIORef revCount (+ 1) >> pure ("revised", "", [])
       registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "initial", rrBodyPtBr = "", rrTags = [], rrRevise = revise, rrApprove = \_ _ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
@@ -207,14 +207,14 @@ spec = do
       readIORef revCount `shouldReturn` 1
 
     it "updates the current body after a revision" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "initial", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("revised", "", []), rrApprove = \_ _ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       pr <- simulateDrain cfg "key-r2"
       simulateThreadMessage cfg "key-r2" "make it shorter"
       readTVarIO (prCurrentBodyEn pr) `shouldReturn` "revised"
 
     it "passes the LATEST body to onApprove after revisions" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       result <- newIORef ("" :: Text)
       -- First revision changes body to "revised"; second approval should fire with "revised".
       registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "initial", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("revised", "", []), rrApprove = \body _ptbr _tags -> writeIORef result body, rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
@@ -224,7 +224,7 @@ spec = do
       readIORef result `shouldReturn` "revised"
 
     it "removes both maps when approved via thread message" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       registerForReview cfg ReviewRequest {rrTitle = "T", rrBodyEn = "B", rrBodyPtBr = "", rrTags = [], rrRevise = \_ _ _ -> pure ("", "", []), rrApprove = \_ _ _ -> pure (), rrReject = \_ -> pure (), rrOnThreadCreated = \_ -> pure (), rrOnUserMessage = \_ -> pure (), rrOnBotMessage = \_ -> pure ()}
       _ <- simulateDrain cfg "key-cl"
       simulateThreadMessage cfg "key-cl" "looks good"
@@ -232,7 +232,7 @@ spec = do
       Map.size rm `shouldBe` 0
   describe "callback contract" $ do
     it "rrOnThreadCreated is called with the thread key after drain" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       calledWith <- newIORef ("" :: Text)
       registerForReview
         cfg
@@ -252,7 +252,7 @@ spec = do
       readIORef calledWith `shouldReturn` "key-tc"
 
     it "rrOnUserMessage is called with the feedback text" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       msgs <- newIORef ([] :: [Text])
       registerForReview
         cfg
@@ -273,7 +273,7 @@ spec = do
       readIORef msgs `shouldReturn` ["add more examples"]
 
     it "rrOnUserMessage is called with the approval text on text-approval" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       msgs <- newIORef ([] :: [Text])
       registerForReview
         cfg
@@ -294,7 +294,7 @@ spec = do
       readIORef msgs `shouldReturn` ["looks good to me"]
 
     it "rrOnBotMessage is called with the revised body after a revision" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       botMsgs <- newIORef ([] :: [Text])
       registerForReview
         cfg
@@ -315,7 +315,7 @@ spec = do
       readIORef botMsgs `shouldReturn` ["revised-body"]
 
     it "rrOnBotMessage accumulates across multiple revisions" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       botMsgs <- newIORef ([] :: [Text])
       counter <- newIORef (0 :: Int)
       let revise _ _ _ = do
@@ -341,7 +341,7 @@ spec = do
       readIORef botMsgs `shouldReturn` ["rev-1", "rev-2"]
 
     it "rrOnBotMessage is NOT called on approval" $ do
-      cfg <- mkDiscordConfig "token" 1 2
+      cfg <- mkDiscordConfig (DiscordBotSettings "token" 1 2 3 (pure ()) (pure ()))
       botMsgs <- newIORef ([] :: [Text])
       registerForReview
         cfg

@@ -2,11 +2,13 @@
 
 module Orchestrator.Discord.Bot
   ( DiscordConfig (..),
+    DiscordBotSettings (..),
     PendingReview (..),
     ReviewRequest (..),
     mkDiscordConfig,
     registerForReview,
     restoreReview,
+    sendInteractionMessage,
     isApprovalMessage,
     startBot,
   )
@@ -25,7 +27,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import Discord
-import Discord.Requests (ChannelRequest (..), MessageDetailedOpts (..), StartThreadForumMediaMessage (..), StartThreadForumMediaOpts (..), StartThreadOpts (..))
+import Discord.Interactions
+import Discord.Requests (ApplicationCommandRequest (..), ChannelRequest (..), InteractionResponseRequest (..), MessageDetailedOpts (..), StartThreadForumMediaMessage (..), StartThreadForumMediaOpts (..), StartThreadOpts (..))
 import Discord.Types
 import Orchestrator.TextUtils (emojiApprove, emojiDraft, emojiReject, emojiRevise, emojiWarning, truncateText)
 import Text.Read (readMaybe)
@@ -96,30 +99,60 @@ data DiscordConfig = DiscordConfig
     dcGuildId :: !Word,
     -- | Forum channel ID where review threads are created.
     dcChannelId :: !Word,
+    -- | Text channel ID used for slash commands and bot notices.
+    dcInteractionChannelId :: !Word,
     -- | Internal queue: pipeline puts review requests here.
     dcSendQueue :: !(MVar ReviewRequest),
     -- | Map from forum-thread-ID text to pending review.  Because the forum
     -- thread ID equals the starter message ID, this single map handles both
     -- reaction events and thread-message events.
-    dcReviewMap :: !(TVar (Map Text PendingReview))
+    dcReviewMap :: !(TVar (Map Text PendingReview)),
+    -- | Live 'DiscordHandle', filled once the bot connects.  Used by
+    -- 'sendInteractionMessage' to post notices from outside the event loop.
+    dcHandle :: !(MVar DiscordHandle),
+    -- | IO action invoked when the @\/discover@ slash command is used.
+    dcOnDiscoverCommand :: IO (),
+    -- | IO action invoked when the @\/draft@ slash command is used.
+    dcOnDraftCommand :: IO ()
   }
 
 -- ---------------------------------------------------------------------------
 -- Configuration
 -- ---------------------------------------------------------------------------
 
+-- | Static settings supplied once at startup to 'mkDiscordConfig'.
+data DiscordBotSettings = DiscordBotSettings
+  { -- | Discord bot token (without the @Bot @ prefix).
+    dbsBotToken :: !Text,
+    -- | Personal server (guild) ID.
+    dbsGuildId :: !Word,
+    -- | Forum channel ID where review threads are created.
+    dbsChannelId :: !Word,
+    -- | Text channel ID used for slash commands and bot notices.
+    dbsInteractionChannelId :: !Word,
+    -- | IO action invoked when the @\/discover@ slash command is used.
+    dbsOnDiscoverCommand :: IO (),
+    -- | IO action invoked when the @\/draft@ slash command is used.
+    dbsOnDraftCommand :: IO ()
+  }
+
 -- | Smart constructor — allocates the internal communication channels.
-mkDiscordConfig :: Text -> Word -> Word -> IO DiscordConfig
-mkDiscordConfig token guildId channelId = do
+mkDiscordConfig :: DiscordBotSettings -> IO DiscordConfig
+mkDiscordConfig DiscordBotSettings {..} = do
   sendQueue <- newEmptyMVar
   reviewMap <- newTVarIO Map.empty
+  handleVar <- newEmptyMVar
   pure
     DiscordConfig
-      { dcBotToken = token,
-        dcGuildId = guildId,
-        dcChannelId = channelId,
+      { dcBotToken = dbsBotToken,
+        dcGuildId = dbsGuildId,
+        dcChannelId = dbsChannelId,
+        dcInteractionChannelId = dbsInteractionChannelId,
         dcSendQueue = sendQueue,
-        dcReviewMap = reviewMap
+        dcReviewMap = reviewMap,
+        dcHandle = handleVar,
+        dcOnDiscoverCommand = dbsOnDiscoverCommand,
+        dcOnDraftCommand = dbsOnDraftCommand
       }
 
 -- ---------------------------------------------------------------------------
@@ -169,11 +202,12 @@ startBot cfg = do
 -- Internal bot workers
 -- ---------------------------------------------------------------------------
 
--- | Launched from 'discordOnStart': forks a thread that drains the send
--- queue and sends embed messages on behalf of the pipeline.
+-- | Launched from 'discordOnStart': stores the live handle for out-of-band
+-- REST calls and forks a thread that drains the send queue.
 botWorker :: DiscordConfig -> DiscordHandler ()
 botWorker cfg = do
   hdl <- ask
+  liftIO $ putMVar (dcHandle cfg) hdl
   liftIO $ void $ forkIO $ drainQueue hdl cfg
 
 -- | Continuously reads 'ReviewRequest' values from the queue, creates a forum
@@ -310,7 +344,79 @@ eventHandler cfg (MessageCreate m) = do
             atomically $ deregister cfg key
             withReregistration cfg key pr "approval" $ fireApproval pr content
           else handleRevision pr content
+eventHandler cfg (Ready _ _ _ _ _ _ (PartialApplication appId _)) =
+  registerSlashCommands appId cfg
+eventHandler cfg (InteractionCreate intr) =
+  handleInteraction cfg intr
 eventHandler _ _ = pure ()
+
+-- | Register the bot's guild slash commands.  Called once from the 'Ready'
+-- event so commands are available immediately without waiting for global
+-- propagation.
+registerSlashCommands :: ApplicationId -> DiscordConfig -> DiscordHandler ()
+registerSlashCommands appId cfg = do
+  let gid = mkGuildId (dcGuildId cfg)
+      cmds =
+        [ ("discover", "Manually trigger content discovery"),
+          ("draft", "Manually trigger post draft generation")
+        ]
+  mapM_ (registerOne gid) cmds
+  liftIO $ putStrLn "[Discord] Slash commands registered."
+  where
+    registerOne gid (name, desc) =
+      case createChatInput name desc of
+        Nothing ->
+          liftIO $ putStrLn $ "[Discord] WARNING: could not build slash command: " <> T.unpack name
+        Just cmd ->
+          void $ restCall (CreateGuildApplicationCommand appId gid cmd)
+
+-- | Route an incoming 'Interaction' to the appropriate slash-command handler.
+-- Commands are only processed when they originate from the configured
+-- interaction channel; all other interactions are silently ignored.
+handleInteraction :: DiscordConfig -> Interaction -> DiscordHandler ()
+handleInteraction cfg intr =
+  case intr of
+    InteractionApplicationCommand
+      { applicationCommandData = ApplicationCommandDataChatInput {applicationCommandDataName = cmdName},
+        interactionChannelId = mChanId
+      }
+        | mChanId == Just (mkChannelId (dcInteractionChannelId cfg)) ->
+            dispatchSlashCommand cfg intr cmdName
+    _ -> pure ()
+
+-- | Acknowledge and dispatch a recognised slash command.
+-- The acknowledgement is sent immediately; the action runs in a forked thread.
+dispatchSlashCommand :: DiscordConfig -> Interaction -> Text -> DiscordHandler ()
+dispatchSlashCommand cfg intr cmdName = do
+  let (reply, logPrefix, action) = case cmdName of
+        "discover" ->
+          ( "Content discovery started! I'll post new topics once I find them.",
+            "[Discovery]",
+            dcOnDiscoverCommand cfg
+          )
+        "draft" ->
+          ( "Draft generation started! I'll create review threads when the drafts are ready.",
+            "[Drafts]",
+            dcOnDraftCommand cfg
+          )
+        _ ->
+          ("Unknown command.", "[Discord]", pure ())
+  void $
+    restCall $
+      CreateInteractionResponse
+        (interactionId intr)
+        (interactionToken intr)
+        (interactionResponseBasic reply)
+  liftIO $ void $ forkIO $ tryLog (logPrefix <> " slash command error") action
+
+-- | Post a plain-text notice to the interaction channel from any IO context.
+-- Blocks until the bot is connected (i.e. 'dcHandle' is filled).
+-- Exceptions are logged but never re-thrown.
+sendInteractionMessage :: DiscordConfig -> Text -> IO ()
+sendInteractionMessage cfg msg = do
+  hdl <- readMVar (dcHandle cfg)
+  tryLog "[Discord] WARNING: failed to send interaction message" $
+    restCallIO hdl (CreateMessage (mkChannelId (dcInteractionChannelId cfg)) msg)
 
 -- | Atomically look up a pending review by key and remove it so the
 -- callback cannot fire more than once.
@@ -405,6 +511,10 @@ restoreReview cfg tidText ReviewRequest {..} =
 -- | Convert a raw Word ID to a Discord 'ChannelId'.
 mkChannelId :: Word -> ChannelId
 mkChannelId w = DiscordId (Snowflake (fromIntegral w))
+
+-- | Convert a raw Word ID to a Discord 'GuildId'.
+mkGuildId :: Word -> GuildId
+mkGuildId w = DiscordId (Snowflake (fromIntegral w))
 
 -- | Render any Discord snowflake-based ID to text for use as a map key.
 showId :: DiscordId a -> Text

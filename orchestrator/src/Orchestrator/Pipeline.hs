@@ -40,10 +40,10 @@ import Orchestrator.Database.Models
     DraftStatus (..),
     TagList (..),
   )
-import Orchestrator.Discord.Bot (DiscordConfig, ReviewRequest (..), registerForReview, restoreReview)
+import Orchestrator.Discord.Bot (DiscordConfig, ReviewRequest (..), registerForReview, restoreReview, sendInteractionMessage)
 import Orchestrator.GitHub.Client (GitHubConfig, commitPost, triggerDeploy)
 import Orchestrator.Posts.Generator (renderHugoPost)
-import Orchestrator.TextUtils (splitTitle, toSlug, truncateText)
+import Orchestrator.TextUtils (emojiQueue, emojiSearch, splitTitle, toSlug, truncateText)
 import Orchestrator.Topics.Selector (ingestDiscoveredContent, pendingContent)
 
 -- ---------------------------------------------------------------------------
@@ -64,11 +64,13 @@ data PipelineEnv = PipelineEnv
 -- ---------------------------------------------------------------------------
 
 -- | Ask Gemini to discover new content and persist it to the database.
+-- On success, posts a notice to the interaction channel.
 runDiscovery :: PipelineEnv -> IO ()
 runDiscovery PipelineEnv {..} = do
   putStrLn "[Discovery] Discovering content via Gemini..."
   runDb pipeDbPool (ingestDiscoveredContent pipeAiCfg)
   putStrLn "[Discovery] Done."
+  sendInteractionMessage pipeDcCfg (emojiSearch <> " **Content discovery complete.** New topics have been added to the queue.")
 
 -- | Pick the next pending content item, generate a Markdown draft, and
 -- register it for Discord review.  The approve/reject callbacks fire as
@@ -83,7 +85,9 @@ runDraftGeneration env@PipelineEnv {..} = do
   pending <- runDb pipeDbPool pendingContent
   case pending of
     [] -> putStrLn "[Drafts] No pending content to process. Skipping."
-    (item : _) -> processDraft env (entityKey item) (entityVal item)
+    (item : _) -> do
+      processDraft env (entityKey item) (entityVal item)
+      sendInteractionMessage pipeDcCfg (emojiQueue <> " **Draft ready for review.** Check the forum channel for a new thread.")
 
 -- | Rehydrate 'dcReviewMap' from the database after a bot restart.
 --
@@ -123,8 +127,7 @@ reloadPendingReviews env@PipelineEnv {..} = do
                       revisedDraft <- reviseDraft pipeAiCfg currentBodyEn currentBodyPtBr feedback
                       recordRevision env pdKey revisedDraft
                       pure (gdBodyEn revisedDraft, gdBodyPtBr revisedDraft, gdTags revisedDraft),
-                    rrApprove = \finalBodyEn finalBodyPtBr finalTags ->
-                      publishDraft env rcKey pdKey createdAt finalBodyEn finalBodyPtBr finalTags,
+                    rrApprove = publishDraft env rcKey pdKey createdAt,
                     rrReject = rejectDraft env rcKey pdKey,
                     rrOnUserMessage = insertComment env pdKey CommentAuthorUser,
                     rrOnBotMessage = insertComment env pdKey CommentAuthorJarvis . truncateText 500,
