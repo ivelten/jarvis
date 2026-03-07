@@ -1,5 +1,7 @@
 {-# LANGUAGE RecordWildCards #-}
 
+{- HLINT ignore "Use lambda-case" -}
+
 -- | Orchestration pipeline: discovery, draft generation, Discord review,
 -- and approval / rejection callbacks.
 --
@@ -10,16 +12,18 @@ module Orchestrator.Pipeline
   ( PipelineEnv (..),
     runDiscovery,
     runDraftGeneration,
+    reloadPendingReviews,
     persistDraftAnalysis,
   )
 where
 
 import Control.Exception (SomeException, displayException, try)
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, getCurrentTime)
-import Database.Persist (entityKey, entityVal, insert, insert_, selectList, update, (=.), (==.))
+import Database.Persist (Entity (..), entityKey, entityVal, insert, insert_, selectList, update, (=.), (==.))
 import Database.Persist.Sql (SqlPersistT)
 import Orchestrator.AI.Client
   ( AiConfig,
@@ -36,7 +40,7 @@ import Orchestrator.Database.Models
     DraftStatus (..),
     TagList (..),
   )
-import Orchestrator.Discord.Bot (DiscordConfig, ReviewRequest (..), registerForReview)
+import Orchestrator.Discord.Bot (DiscordConfig, ReviewRequest (..), registerForReview, restoreReview)
 import Orchestrator.GitHub.Client (GitHubConfig, commitPost, triggerDeploy)
 import Orchestrator.Posts.Generator (renderHugoPost)
 import Orchestrator.TextUtils (splitTitle, toSlug, truncateText)
@@ -69,50 +73,176 @@ runDiscovery PipelineEnv {..} = do
 -- | Pick the next pending content item, generate a Markdown draft, and
 -- register it for Discord review.  The approve/reject callbacks fire as
 -- soon as the reviewer reacts or types an approval in the Discord thread.
+--
+-- Also reloads any drafts that were already sent to Discord but not yet
+-- responded to (e.g. after a bot restart), so every cycle self-heals the
+-- in-memory review map without a separate startup step.
 runDraftGeneration :: PipelineEnv -> IO ()
 runDraftGeneration env@PipelineEnv {..} = do
+  reloadPendingReviews env
   pending <- runDb pipeDbPool pendingContent
   case pending of
     [] -> putStrLn "[Drafts] No pending content to process. Skipping."
     (item : _) -> processDraft env (entityKey item) (entityVal item)
 
+-- | Rehydrate 'dcReviewMap' from the database after a bot restart.
+--
+-- Queries for all 'PostDraft' rows with status 'DraftReviewing' that already
+-- have a Discord thread ID, and re-registers each one in 'dcReviewMap' via
+-- 'restoreReview'.  This lets the bot resume reacting to ✅\/❌ reactions and
+-- review-thread messages without creating duplicate Discord threads.
+reloadPendingReviews :: PipelineEnv -> IO ()
+reloadPendingReviews env@PipelineEnv {..} = do
+  rows <- runDb pipeDbPool $ selectList [PostDraftStatus ==. DraftReviewing] []
+  let withThread = [(k, v, tid) | Entity k v <- rows, Just tid <- [postDraftDiscordThreadId v]]
+  if null withThread
+    then putStrLn "[Jarvis] No in-progress reviews to restore."
+    else mapM_ restore withThread
+  where
+    restore (pdKey, pd, tidText) = do
+      srcRows <- runDb pipeDbPool $ selectList [PostDraftSourcePostDraftId ==. pdKey] []
+      case listToMaybe srcRows of
+        Nothing ->
+          putStrLn $
+            "[Jarvis] Skipping restore for draft '"
+              <> T.unpack (postDraftTitle pd)
+              <> "': no source content found."
+        Just (Entity _ src) -> do
+          let rcKey = postDraftSourceRawContentId src
+              bodyEn = fromMaybe "" (postDraftContentMarkdownEn pd)
+              bodyPtBr = fromMaybe "" (postDraftContentMarkdownPtBr pd)
+              tags = unTagList (postDraftSuggestedTags pd)
+              createdAt = postDraftCreatedAt pd
+          ptBrRef <- newIORef bodyPtBr
+          let rr =
+                ReviewRequest
+                  { rrTitle = postDraftTitle pd,
+                    rrBodyEn = bodyEn,
+                    rrTags = tags,
+                    rrRevise = \currentBodyEn feedback -> do
+                      currentBodyPtBr <- readIORef ptBrRef
+                      revisedDraft <- reviseDraft pipeAiCfg currentBodyEn currentBodyPtBr feedback
+                      writeIORef ptBrRef (gdBodyPtBr revisedDraft)
+                      recordRevision env pdKey revisedDraft
+                      pure (gdBodyEn revisedDraft, gdTags revisedDraft),
+                    rrApprove = \finalBodyEn finalTags -> do
+                      finalBodyPtBr <- readIORef ptBrRef
+                      publishDraft env rcKey pdKey createdAt finalBodyEn finalBodyPtBr finalTags,
+                    rrReject = rejectDraft env rcKey pdKey,
+                    rrOnUserMessage = insertComment env pdKey CommentAuthorUser,
+                    rrOnBotMessage = insertComment env pdKey CommentAuthorJarvis . truncateText 500,
+                    rrOnThreadCreated = \_ -> pure ()
+                  }
+          restoreReview pipeDcCfg tidText rr
+
 -- ---------------------------------------------------------------------------
 -- Internal pipeline steps
 -- ---------------------------------------------------------------------------
 
--- | Full lifecycle for a single content item: generate → persist → review.
+-- | Full lifecycle for a single content item: generate → queue for Discord review.
+-- Persistence is intentionally deferred: the 'PostDraft' row is only inserted
+-- inside 'rrOnThreadCreated' after the Discord forum thread is successfully
+-- created (see 'atomicPersistDraft').  This ensures the database never holds a
+-- 'DraftReviewing' record without a 'discord_thread_id'.
 processDraft :: PipelineEnv -> Key RawContent -> RawContent -> IO ()
 processDraft env@PipelineEnv {..} rcKey rc = do
   putStrLn $ "[Drafts] Generating draft for: " <> T.unpack (rawContentTitle rc)
   draft <- generateDraft pipeAiCfg [rcToDiscovered rc]
   now <- getCurrentTime
-  markAsDrafted env rcKey now
-  postDraftKey <- persistInitialDraft env rcKey draft now
-  putStrLn "[Drafts] Draft sent to Discord for review."
-  rr <- mkReviewRequest env rcKey postDraftKey now draft
+  rr <- mkReviewRequest env rcKey now draft
   registerForReview pipeDcCfg rr
+  putStrLn "[Drafts] Draft queued for Discord review."
 
--- | Flip the raw-content status to 'ContentDrafted' immediately so a
--- restart does not re-pick the same item.
-markAsDrafted :: PipelineEnv -> Key RawContent -> UTCTime -> IO ()
-markAsDrafted PipelineEnv {..} rcKey now =
-  runDb pipeDbPool $
+-- | Build the 'ReviewRequest' record that wires the bot callbacks back into
+-- the pipeline.  The 'PostDraft' row is not inserted until 'rrOnThreadCreated'
+-- fires (after Discord confirms thread creation), so the record always has a
+-- 'discord_thread_id' set.  A shared 'IORef' carries the key from
+-- 'rrOnThreadCreated' to every other callback; if a callback fires before the
+-- key is set (impossible in normal operation) it throws an 'IOError' that is
+-- caught and logged by the bot.
+mkReviewRequest ::
+  PipelineEnv ->
+  Key RawContent ->
+  UTCTime ->
+  GeneratedDraft ->
+  IO ReviewRequest
+mkReviewRequest env rcKey createdAt draft = do
+  ptBrRef <- newIORef (gdBodyPtBr draft)
+  postDraftKeyRef <- newIORef Nothing
+  pure
+    ReviewRequest
+      { rrTitle = gdTitle draft,
+        rrBodyEn = gdBodyEn draft,
+        rrTags = gdTags draft,
+        rrRevise = revise ptBrRef postDraftKeyRef,
+        rrApprove = approve ptBrRef postDraftKeyRef,
+        rrReject = reject' postDraftKeyRef,
+        rrOnUserMessage = onUserMsg postDraftKeyRef,
+        rrOnBotMessage = onBotMsg postDraftKeyRef,
+        rrOnThreadCreated = onThreadCreated postDraftKeyRef
+      }
+  where
+    revise ptBrRef postDraftKeyRef currentBodyEn feedback =
+      withPostDraftKey postDraftKeyRef $ \pdKey -> do
+        currentBodyPtBr <- readIORef ptBrRef
+        revisedDraft <- reviseDraft (pipeAiCfg env) currentBodyEn currentBodyPtBr feedback
+        writeIORef ptBrRef (gdBodyPtBr revisedDraft)
+        recordRevision env pdKey revisedDraft
+        pure (gdBodyEn revisedDraft, gdTags revisedDraft)
+    approve ptBrRef postDraftKeyRef finalBodyEn tags =
+      withPostDraftKey postDraftKeyRef $ \pdKey -> do
+        finalBodyPtBr <- readIORef ptBrRef
+        publishDraft env rcKey pdKey createdAt finalBodyEn finalBodyPtBr tags
+    reject' postDraftKeyRef reason =
+      withPostDraftKey postDraftKeyRef $ \pdKey ->
+        rejectDraft env rcKey pdKey reason
+    onUserMsg postDraftKeyRef msg =
+      withPostDraftKey postDraftKeyRef $ \pdKey ->
+        insertComment env pdKey CommentAuthorUser msg
+    onBotMsg postDraftKeyRef msg =
+      withPostDraftKey postDraftKeyRef $ \pdKey ->
+        insertComment env pdKey CommentAuthorJarvis (truncateText 500 msg)
+    onThreadCreated postDraftKeyRef threadId = do
+      pdKey <- atomicPersistDraft env rcKey draft createdAt threadId
+      writeIORef postDraftKeyRef (Just pdKey)
+
+-- | Read the post draft key from its 'IORef', throwing an 'IOError' if it is
+-- not yet populated.  In normal operation the key is always set by
+-- 'rrOnThreadCreated' before any other callback can fire.
+withPostDraftKey :: IORef (Maybe (Key PostDraft)) -> (Key PostDraft -> IO a) -> IO a
+withPostDraftKey ref action =
+  readIORef ref >>= \mKey ->
+    case mKey of
+      Nothing ->
+        ioError $
+          userError
+            "[Drafts] Post draft key not yet set — 'rrOnThreadCreated' may not have fired"
+      Just k -> action k
+
+-- | Atomically persist the 'PostDraft' together with its Discord thread ID.
+--
+-- Runs a single database transaction that:
+-- * Marks the source 'RawContent' as 'ContentDrafted'.
+-- * Inserts the 'PostDraft' with 'DraftReviewing' status and the supplied
+--   @threadId@ already set, so the record never exists without a thread ID.
+-- * Copies subject associations from the source content item.
+-- * Inserts the initial 'DraftAiAnalysis' telemetry row.
+atomicPersistDraft ::
+  PipelineEnv ->
+  Key RawContent ->
+  GeneratedDraft ->
+  UTCTime ->
+  -- | Discord thread ID returned by the forum-thread creation REST call.
+  Text ->
+  IO (Key PostDraft)
+atomicPersistDraft PipelineEnv {..} rcKey draft createdAt threadId = do
+  now <- getCurrentTime
+  runDb pipeDbPool $ do
     update
       rcKey
       [ RawContentStatus =. ContentDrafted,
         RawContentUpdatedAt =. now
       ]
-
--- | Insert the initial 'PostDraft', 'PostDraftSource', and 'DraftAiAnalysis' rows.
--- Returns the new 'PostDraft' key.
-persistInitialDraft ::
-  PipelineEnv ->
-  Key RawContent ->
-  GeneratedDraft ->
-  UTCTime ->
-  IO (Key PostDraft)
-persistInitialDraft PipelineEnv {..} rcKey draft now =
-  runDb pipeDbPool $ do
     pdKey <-
       insert
         PostDraft
@@ -120,12 +250,12 @@ persistInitialDraft PipelineEnv {..} rcKey draft now =
             postDraftGitBranch = gdBranch draft,
             postDraftSuggestedTags = TagList (gdTags draft),
             postDraftStatus = DraftReviewing,
-            postDraftDiscordThreadId = Nothing,
+            postDraftDiscordThreadId = Just threadId,
             postDraftContentMarkdownEn = Just (gdBodyEn draft),
             postDraftContentMarkdownPtBr = Just (gdBodyPtBr draft),
             postDraftPublishedAt = Nothing,
             postDraftPublishedUrl = Nothing,
-            postDraftCreatedAt = now,
+            postDraftCreatedAt = createdAt,
             postDraftUpdatedAt = now
           }
     -- Copy subject associations from the source content item.
@@ -146,43 +276,6 @@ persistInitialDraft PipelineEnv {..} rcKey draft now =
         }
     persistDraftAnalysis pdKey draft now
     pure pdKey
-
--- | Build the 'ReviewRequest' record that wires the bot callbacks back into
--- the pipeline.  All callbacks close over the pipeline environment and the
--- relevant DB keys, keeping 'processDraft' free of callback scaffolding.
--- The Brazilian Portuguese body is tracked privately via an 'IORef' so that
--- 'ReviewRequest' (and the Discord bot) only ever see the English body.
-mkReviewRequest ::
-  PipelineEnv ->
-  Key RawContent ->
-  Key PostDraft ->
-  UTCTime ->
-  GeneratedDraft ->
-  IO ReviewRequest
-mkReviewRequest env rcKey postDraftKey createdAt draft = do
-  ptBrRef <- newIORef (gdBodyPtBr draft)
-  pure
-    ReviewRequest
-      { rrTitle = gdTitle draft,
-        rrBodyEn = gdBodyEn draft,
-        rrTags = gdTags draft,
-        rrRevise = revise ptBrRef,
-        rrApprove = approve ptBrRef,
-        rrReject = rejectDraft env rcKey postDraftKey,
-        rrOnUserMessage = insertComment env postDraftKey CommentAuthorUser,
-        rrOnBotMessage = insertComment env postDraftKey CommentAuthorJarvis . truncateText 500,
-        rrOnThreadCreated = recordThreadCreated env postDraftKey
-      }
-  where
-    revise ptBrRef currentBodyEn feedback = do
-      currentBodyPtBr <- readIORef ptBrRef
-      revisedDraft <- reviseDraft (pipeAiCfg env) currentBodyEn currentBodyPtBr feedback
-      writeIORef ptBrRef (gdBodyPtBr revisedDraft)
-      recordRevision env postDraftKey revisedDraft
-      pure (gdBodyEn revisedDraft, gdTags revisedDraft)
-    approve ptBrRef finalBodyEn tags = do
-      finalBodyPtBr <- readIORef ptBrRef
-      publishDraft env rcKey postDraftKey createdAt finalBodyEn finalBodyPtBr tags
 
 -- | Insert a 'DraftAiAnalysis' row for a revision step and update the stored bodies.
 recordRevision :: PipelineEnv -> Key PostDraft -> GeneratedDraft -> IO ()
@@ -208,17 +301,6 @@ persistDraftAnalysis pdKey draft analyzedAt =
         draftAiAnalysisTokensUsed = gdTokensUsed draft,
         draftAiAnalysisAnalyzedAt = analyzedAt
       }
-
--- | Persist the Discord thread ID once the forum thread has been created.
-recordThreadCreated :: PipelineEnv -> Key PostDraft -> Text -> IO ()
-recordThreadCreated PipelineEnv {..} postDraftKey threadId = do
-  now <- getCurrentTime
-  runDb pipeDbPool $
-    update
-      postDraftKey
-      [ PostDraftDiscordThreadId =. Just threadId,
-        PostDraftUpdatedAt =. now
-      ]
 
 -- | Insert a 'ReviewComment' row for a reviewer or bot message.
 insertComment :: PipelineEnv -> Key PostDraft -> CommentAuthor -> Text -> IO ()

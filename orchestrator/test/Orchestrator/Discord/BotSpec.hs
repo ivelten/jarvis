@@ -13,7 +13,6 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Discord.Types (ChannelId, DiscordId (..), Snowflake (..))
 import Orchestrator.Discord.Bot
-import Orchestrator.TextUtils (chunkText)
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -222,56 +221,6 @@ spec = do
       simulateThreadMessage cfg "key-cl" "looks good"
       rm <- readTVarIO (dcReviewMap cfg)
       Map.size rm `shouldBe` 0
-
-  describe "chunkText" $ do
-    it "returns a single chunk when text fits within the limit" $
-      chunkText 20 "hello world" `shouldBe` ["hello world"]
-
-    it "splits on the last paragraph boundary" $
-      chunkText 15 "paragraph one\n\nparagraph two\n\nparagraph three"
-        `shouldBe` ["paragraph one", "paragraph two", "paragraph three"]
-
-    it "splits on the last line boundary when no paragraph fits" $
-      chunkText 25 "line one\nline two\nline three"
-        `shouldBe` ["line one\nline two", "line three"]
-
-    it "splits on the last word boundary when no line break fits" $
-      chunkText 20 "one two three four five six"
-        `shouldBe` ["one two three four", "five six"]
-
-    it "hard cuts only when there is no whitespace" $
-      chunkText 5 "abcdefghij" `shouldBe` ["abcde", "fghij"]
-
-    it "does not produce empty chunks" $
-      notElem "" (chunkText 10 "hello\n\nworld") `shouldBe` True
-
-    it "closes and reopens a code fence when splitting inside it" $
-      chunkText 20 "```haskell\nfoo\nbar\nbaz\n```"
-        `shouldBe` ["```haskell\nfoo\nbar\n\n```", "```haskell\nbaz\n```"]
-
-    it "terminates and never emits a bare opener when a long code line forces the split" $
-      -- Regression: when the only split point in a window is the newline right
-      -- after the fence opener (because the code line is longer than maxLen),
-      -- the old code either looped infinitely or emitted a bare opener message.
-      -- The fix forces the split to occur within the code content after the
-      -- opener, so every emitted chunk contains real code.
-      let opener = "```haskell"
-          longLine = T.replicate 3000 "a"
-          body = opener <> "\n" <> longLine <> "\n```"
-          chunks = chunkText 12 body
-       in do
-            length chunks `shouldSatisfy` (> 0)
-            all (\c -> c `notElem` ["```haskell", "```python", "```"]) chunks
-              `shouldBe` True
-
-    it "never emits a bare fence opener when a long word-free code line forces a hard cut" $
-      -- A code line with no spaces forces a hard cut.  The opener must still be
-      -- paired with code content in every emitted chunk.
-      let body = "```haskell\n" <> T.replicate 200 "x" <> "\n```"
-          chunks = chunkText 50 body
-       in all (\c -> c `notElem` ["```haskell", "```python", "```"]) chunks
-            `shouldBe` True
-
   describe "callback contract" $ do
     it "rrOnThreadCreated is called with the thread key after drain" $ do
       cfg <- mkDiscordConfig "token" 1 2

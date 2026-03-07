@@ -1,13 +1,11 @@
 module Orchestrator.TextUtils
   ( truncateText,
-    chunkText,
     splitTitle,
     toSlug,
   )
 where
 
 import Data.Char (isAlphaNum, toLower)
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 
@@ -26,140 +24,6 @@ truncateText maxLen t
             _ -> window
           clean = T.dropWhileEnd (`elem` (",;:—-" :: String)) trimmed
        in clean <> "\x2026"
-
--- | Split 'Text' into chunks of at most @maxLen@ characters.
--- Break priority (highest to lowest):
---
---   1. Last @\\n\\n@ paragraph boundary within the window
---   2. Last @\\n@ line boundary within the window
---   3. Last word boundary (space) within the window
---   4. Hard cut at @maxLen@ (only when no whitespace exists at all,
---      e.g. an extremely long URL or code token)
---
--- Code fences are kept coherent: when a split falls inside an open fence the
--- current chunk is closed with @```@ and the next chunk reopens it with the
--- same fence header.  Splitting right at the fence opener line (with no code
--- content in the chunk) is detected and recovered by forcing a split within the
--- code content that follows, so a bare opener is never emitted as a message.
-chunkText :: Int -> Text -> [Text]
-chunkText maxLen = filter (not . T.null) . map T.strip . go
-  where
-    go t
-      | T.length t <= maxLen = [t]
-      | otherwise =
-          let (next, rest) = splitNext t
-           in next : go rest
-
-    -- \| Extract the next emittable chunk and the remaining text to process.
-    splitNext t =
-      let (chunk, leftover) = bestSplit (T.take maxLen t)
-          overflow = T.drop maxLen t
-       in applyFence chunk leftover overflow
-
-    -- \| Wrap the chunk with fence continuity if it ends inside an open fence.
-    applyFence chunk leftover overflow =
-      case currentFenceOpener chunk of
-        Nothing -> (chunk, leftover <> overflow)
-        Just opener -> sealFence opener chunk leftover overflow
-
-    -- \| The chunk ends inside an open fence.  If no real content follows the
-    -- opener within the window, force a deeper split; otherwise close the
-    -- fence here and reopen it in the next chunk.
-    sealFence opener chunk leftover overflow
-      | T.length opener + 1 >= T.length chunk =
-          let (c, l) = bestSplitWithMinPrefix (T.length opener + 1) (chunk <> leftover)
-           in recoverBareOpener c l overflow
-      | otherwise =
-          (chunk <> "\n```", opener <> "\n" <> leftover <> overflow)
-
-    -- \| After a forced deeper split, check once more.  If the result is still
-    -- a bare opener emit it unchanged (last resort to avoid infinite recursion);
-    -- otherwise close the fence and continue normally.
-    recoverBareOpener chunk leftover overflow =
-      case currentFenceOpener chunk of
-        Nothing -> (chunk, leftover <> overflow)
-        Just ro
-          | T.length ro + 1 >= T.length chunk -> (chunk, leftover <> overflow)
-          | otherwise -> (chunk <> "\n```", ro <> "\n" <> leftover <> overflow)
-
-    -- \| Like 'bestSplit' but treats the first @minPfx@ characters of the
-    -- window as a fixed prefix — the split is only searched for in the
-    -- remainder, preventing the opener line from being chosen as the split
-    -- point.
-    bestSplitWithMinPrefix minPfx window =
-      let prefix = T.take minPfx window
-          rest = T.drop minPfx window
-       in if T.null rest
-            then (window, "")
-            else
-              let (c, l) = bestSplit rest
-               in (prefix <> c, l)
-
-    bestSplit window =
-      repairOrphanedBracket $
-        repairMarkdownLink $
-          case breakLast "\n\n" window of
-            Just p -> p
-            Nothing -> case breakLast "\n" window of
-              Just p -> p
-              Nothing -> fromMaybe (window, "") (breakLastWord window)
-
-    -- \| If the leftover starts with @[…@ that is NOT a Markdown link (i.e.
-    -- no @](@ found within its first 200 characters), retreat the split to the
-    -- last newline boundary inside the chunk.  This prevents a bare token such
-    -- as @[JSON]@ — a continuation line inside a list item — from opening a
-    -- new Discord message without its surrounding list context.
-    repairOrphanedBracket :: (Text, Text) -> (Text, Text)
-    repairOrphanedBracket p@(chunk, leftover) =
-      let stripped = T.dropWhile (== ' ') leftover
-       in if "[" `T.isPrefixOf` stripped
-            && not ("]( " `T.isInfixOf` T.take 200 stripped)
-            && not ("](" `T.isInfixOf` T.take 200 stripped)
-            then case breakLast "\n" (T.stripEnd chunk) of
-              Just (lineChunk, _)
-                | not (T.null (T.stripEnd lineChunk)) ->
-                    let lc = T.stripEnd lineChunk
-                     in (lc, T.drop (T.length lc) (chunk <> leftover))
-              _ -> p
-            else p
-
-    -- \| If the chunk ends with an unclosed Markdown link opener @[…@ (i.e. a
-    -- @[@ with no subsequent @](@ before the end of the chunk), retreat the
-    -- split to just before that @[@.  This prevents links in the Further
-    -- Reading section — or anywhere else — from being torn across two
-    -- Discord messages.
-    repairMarkdownLink p@(chunk, leftover) =
-      case T.breakOnEnd "[" chunk of
-        ("", _) -> p -- no '[' in chunk, nothing to repair
-        (beforeIncl, afterOpen)
-          | "](" `T.isInfixOf` afterOpen -> p -- '[' is properly closed within the chunk
-          | otherwise ->
-              let safeChunk = T.stripEnd (T.dropEnd 1 beforeIncl)
-               in if T.null safeChunk
-                    then p -- can't retreat further; leave as-is to avoid an infinite loop
-                    else (safeChunk, T.drop (T.length safeChunk) (chunk <> leftover))
-
-    currentFenceOpener :: Text -> Maybe Text
-    currentFenceOpener = stepLines Nothing . T.lines
-      where
-        stepLines state [] = state
-        stepLines Nothing (l : ls)
-          | "```" `T.isPrefixOf` T.strip l = stepLines (Just (T.strip l)) ls
-          | otherwise = stepLines Nothing ls
-        stepLines (Just opener) (l : ls)
-          | T.strip l == "```" = stepLines Nothing ls
-          | otherwise = stepLines (Just opener) ls
-
-    breakLast sep t =
-      let parts = T.splitOn sep t
-       in if length parts <= 1
-            then Nothing
-            else Just (T.intercalate sep (init parts) <> sep, last parts)
-
-    breakLastWord t =
-      case T.breakOnEnd " " t of
-        ("", _) -> Nothing
-        (pre, suf) -> Just (pre, suf)
 
 -- | Split the first Markdown H1 heading from the document body.
 -- Returns @(title, body)@ where @title@ has the leading @#@ stripped.

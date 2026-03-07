@@ -6,6 +6,7 @@ module Orchestrator.Discord.Bot
     ReviewRequest (..),
     mkDiscordConfig,
     registerForReview,
+    restoreReview,
     isApprovalMessage,
     startBot,
   )
@@ -22,10 +23,12 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Text.Encoding (encodeUtf8)
 import Discord
-import Discord.Requests (ChannelRequest (..), StartThreadForumMediaMessage (..), StartThreadForumMediaOpts (..), StartThreadOpts (..))
+import Discord.Requests (ChannelRequest (..), MessageDetailedOpts (..), StartThreadForumMediaMessage (..), StartThreadForumMediaOpts (..), StartThreadOpts (..))
 import Discord.Types
-import Orchestrator.TextUtils (chunkText, truncateText)
+import Orchestrator.TextUtils (truncateText)
+import Text.Read (readMaybe)
 
 -- ---------------------------------------------------------------------------
 -- Types
@@ -188,77 +191,74 @@ drainQueue hdl cfg = forever $ do
 -- | Create the forum thread, post the draft, and register the pending review.
 processReview :: DiscordHandle -> DiscordConfig -> ReviewRequest -> IO ()
 processReview hdl cfg ReviewRequest {..} = do
-  let chanId = mkChannelId (dcChannelId cfg)
-      embed =
-        def
-          { createEmbedTitle = rrTitle,
-            createEmbedDescription = truncateText 500 rrBodyEn,
-            createEmbedFooterText =
-              "React " <> emojiApprove <> " to approve, " <> emojiReject <> " to reject, or type feedback in the thread."
-          }
-      forumMsg =
-        StartThreadForumMediaMessage
-          { startThreadForumMediaMessageContent = "",
-            startThreadForumMediaMessageEmbeds = Just [embed],
-            startThreadForumMediaMessageAllowedMentions = Nothing,
-            startThreadForumMediaMessageComponents = Nothing,
-            startThreadForumMediaMessageStickerIds = Nothing
-          }
-      forumOpts =
-        StartThreadForumMediaOpts
-          { startThreadForumMediaBaseOpts = def {startThreadName = rrTitle},
-            startThreadForumMediaMessage = forumMsg,
-            startThreadForumMediaAppliedTags = Nothing
-          }
-  result <- runReaderT (restCall (StartThreadForumMedia chanId forumOpts)) hdl
-  case result of
-    Left err ->
-      putStrLn $ "[Discord] failed to create forum thread: " <> show err
+  threadResult <- runReaderT (restCall (StartThreadForumMedia chanId forumOpts)) hdl
+  case threadResult of
+    Left err -> ioError . userError $ "failed to create forum thread: " <> show err
     Right thread -> do
       let tid = channelId thread
           key = showId tid
-          -- In a forum channel the starter message ID equals the thread ID.
           starterMsgId = DiscordId (unId tid) :: MessageId
-      putStrLn $ "[Discord] Thread created (tid=" <> T.unpack key <> "), posting draft body..."
-      postChunked hdl tid (emojiDraft <> " **Draft:**\n\n") rrBodyEn
-      -- Wait before adding reactions so they don't compete for the rate-limit
-      -- bucket with the last draft chunk.
-      threadDelay 2_000_000
-      -- Build and register the PendingReview.
-      bodyEnVar <- newTVarIO rrBodyEn
-      tagsVar <- newTVarIO rrTags
-      let pr =
-            PendingReview
-              { prTitle = rrTitle,
-                prCurrentBodyEn = bodyEnVar,
-                prCurrentTags = tagsVar,
-                prKey = key,
-                prThreadId = tid,
-                prRevise = rrRevise,
-                prApprove = rrApprove,
-                prReject = rrReject,
-                prOnUserMessage = rrOnUserMessage,
-                prOnBotMessage = rrOnBotMessage
-              }
-      atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert key pr)
-      -- Notify the caller that the thread has been created.
-      rrOnThreadCreated key
-      -- Add reaction affordances to the forum thread starter message.
-      -- The starter message lives inside the thread channel (tid), not the
-      -- parent forum channel (chanId).
-      restCallIO hdl (CreateReaction (tid, starterMsgId) emojiApprove)
-      restCallIO hdl (CreateReaction (tid, starterMsgId) emojiReject)
-      putStrLn "[Discord] Review setup complete."
+      putStrLn $ "[Discord] Thread created (tid=" <> T.unpack key <> "), running on-created callback..."
+      persistResult <- try (rrOnThreadCreated key) :: IO (Either SomeException ())
+      case persistResult of
+        Left ex ->
+          putStrLn $ "[Discord] ERROR: on-thread-created callback failed; draft not persisted: " <> displayException ex
+        Right () -> do
+          putStrLn "[Discord] Draft persisted. Posting draft body to thread..."
+          tryLog "[Discord] ERROR: failed to post draft body" $
+            postAsFile hdl tid (emojiDraft <> " **Draft:**") rrBodyEn
+          threadDelay 2_000_000
+          bodyEnVar <- newTVarIO rrBodyEn
+          tagsVar <- newTVarIO rrTags
+          let pr =
+                PendingReview
+                  { prTitle = rrTitle,
+                    prCurrentBodyEn = bodyEnVar,
+                    prCurrentTags = tagsVar,
+                    prKey = key,
+                    prThreadId = tid,
+                    prRevise = rrRevise,
+                    prApprove = rrApprove,
+                    prReject = rrReject,
+                    prOnUserMessage = rrOnUserMessage,
+                    prOnBotMessage = rrOnBotMessage
+                  }
+          atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert key pr)
+          tryLog "[Discord] WARNING: failed to add approve reaction" $
+            restCallIO hdl (CreateReaction (tid, starterMsgId) emojiApprove)
+          tryLog "[Discord] WARNING: failed to add reject reaction" $
+            restCallIO hdl (CreateReaction (tid, starterMsgId) emojiReject)
+          putStrLn "[Discord] Review setup complete."
+  where
+    chanId = mkChannelId (dcChannelId cfg)
+    embed =
+      def
+        { createEmbedTitle = rrTitle,
+          createEmbedDescription = truncateText 500 rrBodyEn,
+          createEmbedFooterText =
+            "React " <> emojiApprove <> " to approve, " <> emojiReject <> " to reject, or type feedback in the thread."
+        }
+    forumMsg =
+      StartThreadForumMediaMessage
+        { startThreadForumMediaMessageContent = "",
+          startThreadForumMediaMessageEmbeds = Just [embed],
+          startThreadForumMediaMessageAllowedMentions = Nothing,
+          startThreadForumMediaMessageComponents = Nothing,
+          startThreadForumMediaMessageStickerIds = Nothing
+        }
+    forumOpts =
+      StartThreadForumMediaOpts
+        { startThreadForumMediaBaseOpts = def {startThreadName = rrTitle},
+          startThreadForumMediaMessage = forumMsg,
+          startThreadForumMediaAppliedTags = Nothing
+        }
 
 -- | Handle incoming Discord events.
 --
--- * 'MessageReactionAdd' on a forum starter message: approve (✅) or reject (❌).
---   The starter message ID equals the thread ID, so 'dcReviewMap' is used.
--- * 'MessageCreate' inside a review thread: if 'isApprovalMessage' returns
---   'True', approve with the current body; otherwise call the AI revision
---   function and post the revised draft back.
+-- * 'MessageReactionAdd': approve (✅) or reject (❌) by a non-bot user.
+-- * 'MessageCreate': approval phrase triggers the approve callback;
+--   anything else triggers an AI revision.
 eventHandler :: DiscordConfig -> Event -> DiscordHandler ()
--- \| Reaction-based approval / rejection.
 eventHandler cfg (MessageReactionAdd ri) = do
   cache <- readCache
   let botId = userId (cacheCurrentUser cache)
@@ -270,33 +270,25 @@ eventHandler cfg (MessageReactionAdd ri) = do
       Nothing -> pure ()
       Just pr ->
         liftIO $
-          if emoji == emojiApprove
-            then do
-              prOnUserMessage pr emoji
-              bodyEn <- readTVarIO (prCurrentBodyEn pr)
-              tags <- readTVarIO (prCurrentTags pr)
-              prApprove pr bodyEn tags
-            else do
-              prOnUserMessage pr emoji
-              prReject pr emoji
--- \| Thread-message-based revision / approval.
+          withReregistration cfg key pr "reaction callback" $
+            if emoji == emojiApprove
+              then fireApproval pr emoji
+              else fireRejection pr emoji
 eventHandler cfg (MessageCreate m) = do
   cache <- readCache
   let botId = userId (cacheCurrentUser cache)
   when (not (userIsBot (messageAuthor m)) && userId (messageAuthor m) /= botId) $ do
     let key = showId (messageChannelId m)
-    reviewMapSnap <- liftIO $ readTVarIO (dcReviewMap cfg)
-    case Map.lookup key reviewMapSnap of
+        content = messageContent m
+    reviewMap <- liftIO $ readTVarIO (dcReviewMap cfg)
+    case Map.lookup key reviewMap of
       Nothing -> pure ()
       Just pr ->
-        if isApprovalMessage (messageContent m)
+        if isApprovalMessage content
           then liftIO $ do
             atomically $ deregister cfg key
-            prOnUserMessage pr (messageContent m)
-            bodyEn <- readTVarIO (prCurrentBodyEn pr)
-            tags <- readTVarIO (prCurrentTags pr)
-            prApprove pr bodyEn tags
-          else handleRevision pr (messageContent m)
+            withReregistration cfg key pr "approval" $ fireApproval pr content
+          else handleRevision pr content
 eventHandler _ _ = pure ()
 
 -- | Atomically look up a pending review by key and remove it so the
@@ -319,30 +311,69 @@ deregister cfg key =
 -- into the thread.  On failure, post an error message instead.
 handleRevision :: PendingReview -> Text -> DiscordHandler ()
 handleRevision pr feedback = do
-  liftIO $ prOnUserMessage pr feedback
-  result <- liftIO $ do
+  liftIO $
+    tryLog "[Discord] WARNING: failed to record user message" $
+      prOnUserMessage pr feedback
+  reviseResult <- liftIO $ do
     currentBodyEn <- readTVarIO (prCurrentBodyEn pr)
     try (prRevise pr currentBodyEn feedback) :: IO (Either SomeException (Text, [Text]))
-  case result of
+  case reviseResult of
     Left ex -> do
       let errMsg = "Could not revise draft: " <> T.pack (displayException ex)
       liftIO $ putStrLn $ "[Drafts] Gemini error: " <> T.unpack errMsg
-      void $
-        restCall $
-          CreateMessage
-            (prThreadId pr)
-            (emojiWarning <> " " <> errMsg)
+      sendResult <- restCall $ CreateMessage (prThreadId pr) (emojiWarning <> " " <> errMsg)
+      case sendResult of
+        Left e -> liftIO $ putStrLn $ "[Discord] WARNING: also failed to send error message to thread: " <> show e
+        Right _ -> pure ()
     Right (newBodyEn, newTags) -> do
       liftIO $ atomically $ do
         writeTVar (prCurrentBodyEn pr) newBodyEn
         writeTVar (prCurrentTags pr) newTags
-      liftIO $ prOnBotMessage pr newBodyEn
+      liftIO $
+        tryLog "[Discord] WARNING: failed to record bot message" $
+          prOnBotMessage pr newBodyEn
       hdl <- ask
-      liftIO $ postChunked hdl (prThreadId pr) (emojiRevise <> " **Revised draft:**\n\n") newBodyEn
+      liftIO $
+        tryLog "[Discord] ERROR: failed to post revised draft to thread" $
+          postAsFile hdl (prThreadId pr) (emojiRevise <> " **Revised draft:**") newBodyEn
 
 -- ---------------------------------------------------------------------------
 -- Utilities
 -- ---------------------------------------------------------------------------
+
+-- | Re-register a review that already has a Discord forum thread (e.g. after
+-- a bot restart).  Unlike 'registerForReview', this does NOT create a new
+-- forum thread — it simply inserts a fresh 'PendingReview' into 'dcReviewMap'
+-- so that subsequent reactions and messages are handled normally.
+--
+-- If @tidText@ cannot be parsed as a Discord snowflake the call is a no-op
+-- and a warning is printed.
+restoreReview :: DiscordConfig -> Text -> ReviewRequest -> IO ()
+restoreReview cfg tidText ReviewRequest {..} =
+  case readMaybe (T.unpack tidText) :: Maybe Integer of
+    Nothing ->
+      putStrLn $
+        "[Discord] WARNING: could not restore review (unparseable thread ID): "
+          <> T.unpack tidText
+    Just n -> do
+      let tid = DiscordId (Snowflake (fromIntegral n)) :: ChannelId
+      bodyEnVar <- newTVarIO rrBodyEn
+      tagsVar <- newTVarIO rrTags
+      let pr =
+            PendingReview
+              { prTitle = rrTitle,
+                prCurrentBodyEn = bodyEnVar,
+                prCurrentTags = tagsVar,
+                prKey = tidText,
+                prThreadId = tid,
+                prRevise = rrRevise,
+                prApprove = rrApprove,
+                prReject = rrReject,
+                prOnUserMessage = rrOnUserMessage,
+                prOnBotMessage = rrOnBotMessage
+              }
+      atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert tidText pr)
+      putStrLn $ "[Discord] Restored pending review: " <> T.unpack rrTitle
 
 -- | Convert a raw Word ID to a Discord 'ChannelId'.
 mkChannelId :: Word -> ChannelId
@@ -351,6 +382,43 @@ mkChannelId w = DiscordId (Snowflake (fromIntegral w))
 -- | Render any Discord snowflake-based ID to text for use as a map key.
 showId :: DiscordId a -> Text
 showId i = T.pack $ show $ unSnowflake $ unId i
+
+-- | Run an IO action, catching any exception and logging it with the given
+-- prefix.  Always continues after logging; use this for non-fatal steps.
+tryLog :: String -> IO () -> IO ()
+tryLog prefix action = do
+  result <- try action :: IO (Either SomeException ())
+  case result of
+    Left ex -> putStrLn $ prefix <> ": " <> displayException ex
+    Right () -> pure ()
+
+-- | Run an IO action that was preceded by deregistering a 'PendingReview'.
+-- On failure the review is re-inserted into 'dcReviewMap' so it can be
+-- retried, and the exception is logged.
+withReregistration :: DiscordConfig -> Text -> PendingReview -> String -> IO () -> IO ()
+withReregistration cfg key pr label action = do
+  result <- try action :: IO (Either SomeException ())
+  case result of
+    Left ex -> do
+      atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert key pr)
+      putStrLn $ "[Discord] " <> label <> " failed (review re-registered): " <> displayException ex
+    Right () -> pure ()
+
+-- | Read the current body and tags from a 'PendingReview' and fire the
+-- approve callback.  Records the trigger text (emoji or message) as a user
+-- comment first.
+fireApproval :: PendingReview -> Text -> IO ()
+fireApproval pr trigger = do
+  prOnUserMessage pr trigger
+  bodyEn <- readTVarIO (prCurrentBodyEn pr)
+  tags <- readTVarIO (prCurrentTags pr)
+  prApprove pr bodyEn tags
+
+-- | Record the trigger text as a user comment and fire the reject callback.
+fireRejection :: PendingReview -> Text -> IO ()
+fireRejection pr trigger = do
+  prOnUserMessage pr trigger
+  prReject pr trigger
 
 -- | Fire a Discord REST call via a raw handle, discarding the result.
 restCallIO :: (FromJSON a) => DiscordHandle -> ChannelRequest a -> IO ()
@@ -365,41 +433,21 @@ emojiDraft = "\x1f4dd" -- 📝
 emojiRevise = "\x270f\xfe0f" -- ✏️
 emojiWarning = "\x26a0\xfe0f" -- ⚠️
 
--- | Post a (potentially long) body to a Discord channel, splitting it into
--- multiple messages of at most 1900 characters each. The @header@ is
--- prepended to the first message only.
---
--- A 2-second delay is inserted between consecutive messages to stay well
--- within Discord's per-channel rate limit (5 messages / 5 seconds).
-postChunked :: DiscordHandle -> ChannelId -> Text -> Text -> IO ()
-postChunked hdl tid header body = do
-  let chunks = chunkText 1_900 body
-      messages = case chunks of
-        [] -> [header]
-        (c : cs) -> (header <> c) : cs
-      total = length messages
+-- | Post a draft body to a Discord channel as a @draft.md@ file attachment.
+-- This avoids Discord's 2000-character message limit entirely and keeps the
+-- draft in a single, easily downloadable message.
+postAsFile :: DiscordHandle -> ChannelId -> Text -> Text -> IO ()
+postAsFile hdl tid caption body = do
   putStrLn $
-    "[Discord] Sending draft in "
-      <> show total
-      <> " message(s), body length: "
+    "[Discord] Posting draft as file attachment ("
       <> show (T.length body)
-      <> " chars."
-  mapM_ send (zip [1 :: Int ..] messages)
-  where
-    send (i, msg) = do
-      when (i > 1) $ threadDelay 2_000_000 -- 2 s between messages
-      result <- runReaderT (restCall (CreateMessage tid msg)) hdl
-      case result of
-        Left err ->
-          putStrLn $
-            "[Discord] Failed to send message chunk "
-              <> show i
-              <> ": "
-              <> show err
-        Right _ ->
-          putStrLn $
-            "[Discord] Sent chunk "
-              <> show i
-              <> " ("
-              <> show (T.length msg)
-              <> " chars)."
+      <> " chars)."
+  let opts =
+        def
+          { messageDetailedContent = caption,
+            messageDetailedFile = Just ("draft.md", encodeUtf8 body)
+          }
+  result <- runReaderT (restCall (CreateMessageDetailed tid opts)) hdl
+  case result of
+    Left err -> putStrLn $ "[Discord] Failed to post file attachment: " <> show err
+    Right _ -> putStrLn "[Discord] Draft posted as file attachment."
