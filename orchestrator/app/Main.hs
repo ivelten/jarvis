@@ -5,6 +5,7 @@ import Control.Exception (SomeException, displayException, try)
 import qualified Data.ByteString.Char8 as BC
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
+import qualified Data.Text as T
 import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Orchestrator.AI.Client (AiConfig (..))
@@ -26,8 +27,9 @@ data Config = Config
     cfgDbUrl :: !String,
     -- | Google Gemini API key.
     cfgGeminiKey :: !Text,
-    -- | Gemini model name (default: @gemini-2.5-flash@).
-    cfgGeminiModel :: !Text,
+    -- | Gemini models in priority order (default: see 'defaultGeminiModels').
+    -- On a rate-limit error the next model in the list is tried automatically.
+    cfgGeminiModels :: ![Text],
     -- | GitHub Personal Access Token with @contents:write@ and @actions:write@.
     cfgGhToken :: !Text,
     -- | GitHub organisation or user that owns the target repository.
@@ -57,7 +59,7 @@ instance FromEnv Config where
     Config
       <$> env "DATABASE_URL"
       <*> env "GEMINI_API_KEY"
-      <*> (fromMaybe "gemini-2.5-flash" <$> envMaybe "GEMINI_MODEL")
+      <*> (maybe defaultGeminiModels parseGeminiModels <$> envMaybe "GEMINI_MODELS")
       <*> env "GITHUB_TOKEN"
       <*> env "GITHUB_REPO_OWNER"
       <*> env "GITHUB_REPO_NAME"
@@ -73,6 +75,19 @@ instance FromEnv Config where
 -- ---------------------------------------------------------------------------
 -- Utilities
 -- ---------------------------------------------------------------------------
+
+-- | Ordered list of Gemini models to try, highest-priority first.
+-- Used when 'GEMINI_MODELS' is not set in the environment.
+defaultGeminiModels :: [Text]
+defaultGeminiModels =
+  [ "gemini-2.5-flash-lite",
+    "gemini-2.5-flash"
+  ]
+
+-- | Parse a comma-separated list of model names from the 'GEMINI_MODELS'
+-- environment variable, dropping any blank entries.
+parseGeminiModels :: Text -> [Text]
+parseGeminiModels = filter (not . T.null) . map T.strip . T.splitOn ","
 
 -- | Sleep for @n@ seconds (converts to microseconds for 'threadDelay').
 sleepSecs :: Int -> IO ()
@@ -95,7 +110,7 @@ mkAiConfig :: Config -> Manager -> AiConfig
 mkAiConfig cfg manager =
   AiConfig
     { aiApiKey = cfgGeminiKey cfg,
-      aiModel = cfgGeminiModel cfg,
+      aiModels = cfgGeminiModels cfg,
       aiManager = manager
     }
 

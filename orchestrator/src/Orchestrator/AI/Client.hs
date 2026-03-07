@@ -8,6 +8,9 @@ module Orchestrator.AI.Client
     discoverContent,
     generateDraft,
     reviseDraft,
+    isRateLimitError,
+    isFallbackError,
+    tryModelsInOrder,
     extractText,
     extractFinishReason,
     extractTokenCount,
@@ -21,11 +24,12 @@ module Orchestrator.AI.Client
   )
 where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeException, displayException, throwIO, try)
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseMaybe)
 import qualified Data.ByteString.Lazy as LBS
 import Data.FileEmbed (embedFile, makeRelativeToProject)
+import Data.List (isInfixOf)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe)
@@ -56,8 +60,10 @@ import Orchestrator.TextUtils (splitTitle, toSlug)
 data AiConfig = AiConfig
   { -- | Google AI API key (from environment, see https://aistudio.google.com/apikey).
     aiApiKey :: !Text,
-    -- | Model identifier, e.g. @"gemini-2.5-flash"@ or @"gemini-2.5-pro"@.
-    aiModel :: !Text,
+    -- | Ordered list of model identifiers to try, highest-priority first.
+    -- When a model returns a rate-limit error (HTTP 429 / RESOURCE_EXHAUSTED)
+    -- the next model in the list is attempted automatically.
+    aiModels :: ![Text],
     aiManager :: !Manager
   }
 
@@ -165,19 +171,19 @@ revisePromptTemplate = TE.decodeUtf8 $(makeRelativeToProject "prompts/revise_dra
 -- Internal HTTP helpers
 -- ---------------------------------------------------------------------------
 
--- | Build the @generateContent@ endpoint URL for the configured model.
-generateContentUrl :: AiConfig -> String
-generateContentUrl AiConfig {..} =
+-- | Build the @generateContent@ endpoint URL for a specific model.
+generateContentUrl :: AiConfig -> Text -> String
+generateContentUrl AiConfig {..} model =
   "https://generativelanguage.googleapis.com/v1beta/models/"
-    <> T.unpack aiModel
+    <> T.unpack model
     <> ":generateContent?key="
     <> T.unpack aiApiKey
 
--- | POST a JSON body to the Gemini @generateContent@ endpoint and return the
---   raw response bytes.
-postGemini :: AiConfig -> Value -> IO LBS.ByteString
-postGemini cfg body = do
-  initReq <- parseRequest (generateContentUrl cfg)
+-- | POST a JSON body to the Gemini @generateContent@ endpoint for a specific
+-- model and return the raw response bytes.
+postGemini :: AiConfig -> Text -> Value -> IO LBS.ByteString
+postGemini cfg model body = do
+  initReq <- parseRequest (generateContentUrl cfg model)
   let req =
         initReq
           { method = "POST",
@@ -187,12 +193,47 @@ postGemini cfg body = do
           }
   responseBody <$> httpLbs req (aiManager cfg)
 
--- | POST a request body to Gemini and return the extracted text and total
+-- | Returns 'True' when the exception indicates a Gemini rate-limit error
+-- (HTTP 429 or RESOURCE_EXHAUSTED).  Used by 'tryModelsInOrder' to decide
+-- whether to fall through to the next model.
+isRateLimitError :: SomeException -> Bool
+isRateLimitError ex =
+  let msg = displayException ex
+   in "429" `isInfixOf` msg || "RESOURCE_EXHAUSTED" `isInfixOf` msg
+
+-- | Returns 'True' for any transient Gemini error that warrants falling
+-- through to the next model: rate limits and empty responses.
+-- An empty response (finishReason=STOP with no text) can occur when a
+-- model does not fully support grounded search; a more capable model in
+-- the priority list should succeed.
+isFallbackError :: SomeException -> Bool
+isFallbackError ex =
+  isRateLimitError ex
+    || "could not extract text from response" `isInfixOf` displayException ex
+
+-- | Try each model from the priority list in order, falling through to the
+-- next model on any transient error detected by 'isFallbackError'
+-- (rate limits and empty/unsupported responses).
+-- Raises an 'IOError' when all models are exhausted or a non-transient error
+-- occurs.
+tryModelsInOrder :: [Text] -> (Text -> IO a) -> IO a
+tryModelsInOrder [] _ = ioError (userError "Gemini: all configured models failed or are rate-limited")
+tryModelsInOrder (model : rest) action = do
+  result <- try (action model)
+  case result of
+    Right v -> pure v
+    Left ex
+      | isFallbackError ex -> do
+          putStrLn $ "[AI] Model " <> T.unpack model <> " unavailable (" <> displayException (ex :: SomeException) <> "), trying next..."
+          tryModelsInOrder rest action
+      | otherwise -> throwIO (ex :: SomeException)
+
+-- | Call Gemini with a specific model and return the extracted text and total
 -- token count, raising an 'IOError' on HTTP errors, API error responses, or
 -- missing content.
-callGemini :: AiConfig -> Value -> IO (Text, Int)
-callGemini cfg body = do
-  respBody <- postGemini cfg body
+callGeminiWith :: AiConfig -> Text -> Value -> IO (Text, Int)
+callGeminiWith cfg model body = do
+  respBody <- postGemini cfg model body
   case eitherDecode respBody of
     Left err -> ioError (userError $ "Gemini HTTP response parse error: " <> err)
     Right v -> do
@@ -203,6 +244,15 @@ callGemini cfg body = do
             "Gemini: could not extract text from response"
               <> maybe "" (\r -> " (finishReason=" <> T.unpack r <> ")") (extractFinishReason v)
         Just txt -> pure (txt, extractTokenCount v)
+
+-- | POST a request body to Gemini, trying models from 'aiModels' in priority
+-- order.  On a rate-limit error the next model is attempted automatically.
+-- Raises an 'IOError' when all models are exhausted or a non-rate-limit error
+-- occurs.
+callGemini :: AiConfig -> Value -> IO (Text, Int)
+callGemini cfg body =
+  tryModelsInOrder (aiModels cfg) $ \model ->
+    callGeminiWith cfg model body
 
 -- | Build a @contents@ array with a single user turn.
 userContents :: Text -> Value

@@ -153,7 +153,7 @@ All configuration is read from environment variables. See `.env.example` for the
 | --- | --- | --- | --- |
 | `DATABASE_URL` | ✅ | — | PostgreSQL connection string |
 | `GEMINI_API_KEY` | ✅ | — | Google AI API key |
-| `GEMINI_MODEL` | | `gemini-2.5-flash` | Gemini model name |
+| `GEMINI_MODELS` | | `gemini-2.5-flash-lite,gemini-2.5-flash` | Comma-separated list of Gemini model names in priority order. On a rate-limit error (HTTP 429) the next model is tried automatically. |
 | `GITHUB_TOKEN` | ✅ | — | PAT with `contents:write`, `actions:write` |
 | `GITHUB_REPO_OWNER` | ✅ | — | GitHub user or org name |
 | `GITHUB_REPO_NAME` | ✅ | — | Repository name |
