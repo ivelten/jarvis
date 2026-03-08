@@ -389,6 +389,25 @@ handleRevisionResult hdl chanId (RevisionOk newBodyEn newBodyPtBr) = do
   tryLog "[Discord] ERROR: failed to post revised PT-BR draft" $
     postAsFile hdl chanId (emojiRevise <> " **Revised draft (PT-BR):**") "draft-pt-br.md" newBodyPtBr
 
+-- ---------------------------------------------------------------------------
+-- Slash command names
+-- ---------------------------------------------------------------------------
+
+cmdDiscover :: Text
+cmdDiscover = "discover"
+
+cmdDraft :: Text
+cmdDraft = "draft"
+
+cmdSubject :: Text
+cmdSubject = "subject"
+
+cmdDisableSubject :: Text
+cmdDisableSubject = "disable-subject"
+
+cmdListSubjects :: Text
+cmdListSubjects = "list-subjects"
+
 -- | Register the bot's guild slash commands.  Called once from the 'Ready'
 -- event so commands are available immediately without waiting for global
 -- propagation.
@@ -396,9 +415,9 @@ registerSlashCommands :: ApplicationId -> DiscordConfig -> DiscordHandler ()
 registerSlashCommands appId cfg = do
   let gid = mkGuildId (dcGuildId cfg)
       cmds =
-        [ ("discover", "Manually trigger content discovery"),
-          ("draft", "Manually trigger post draft generation"),
-          ("list-subjects", "List all enabled subjects")
+        [ (cmdDiscover, "Manually trigger content discovery"),
+          (cmdDraft, "Manually trigger post draft generation"),
+          (cmdListSubjects, "List all enabled subjects")
         ]
   mapM_ (registerSimpleCommand appId gid) cmds
   registerSubjectCommand appId gid
@@ -417,7 +436,7 @@ registerSimpleCommand appId gid (name, desc) =
 -- | Register the @\/subject@ slash command with a required string @name@ option.
 registerSubjectCommand :: ApplicationId -> GuildId -> DiscordHandler ()
 registerSubjectCommand appId gid =
-  case createChatInput "subject" "Add a new subject of interest for the blog" of
+  case createChatInput cmdSubject "Add a new subject of interest for the blog" of
     Nothing ->
       liftIO $ putStrLn "[Discord] WARNING: could not build subject slash command"
     Just cmd -> do
@@ -444,7 +463,7 @@ registerSubjectCommand appId gid =
 -- | Register the @\/disable-subject@ slash command with a required integer @id@ option.
 registerDisableSubjectCommand :: ApplicationId -> GuildId -> DiscordHandler ()
 registerDisableSubjectCommand appId gid =
-  case createChatInput "disable-subject" "Disable a subject by ID" of
+  case createChatInput cmdDisableSubject "Disable a subject by ID" of
     Nothing ->
       liftIO $ putStrLn "[Discord] WARNING: could not build disable-subject slash command"
     Just cmd -> do
@@ -487,17 +506,19 @@ handleInteraction cfg intr =
 dispatchSlashCommand :: DiscordConfig -> Interaction -> Text -> DiscordHandler ()
 dispatchSlashCommand cfg intr cmdName = do
   let (reply, logPrefix, action) = case cmdName of
-        "discover" ->
-          ( "Content discovery started! I'll post new topics once I find them.",
-            "[Discovery]",
-            dcOnDiscoverCommand cfg
-          )
-        "draft" ->
-          ( "Draft generation started! I'll create review threads when the drafts are ready.",
-            "[Drafts]",
-            dcOnDraftCommand cfg
-          )
-        "subject" ->
+        _
+          | cmdName == cmdDiscover ->
+              ( "Content discovery started! I'll post new topics once I find them.",
+                "[Discovery]",
+                dcOnDiscoverCommand cfg
+              )
+        _
+          | cmdName == cmdDraft ->
+              ( "Draft generation started! I'll create review threads when the drafts are ready.",
+                "[Drafts]",
+                dcOnDraftCommand cfg
+              )
+        _ | cmdName == cmdSubject ->
           case extractStringOption "name" intr of
             Nothing ->
               ("Please provide a subject name.", "[Subject]", pure ())
@@ -506,7 +527,7 @@ dispatchSlashCommand cfg intr cmdName = do
                 "[Subject]",
                 dcOnSubjectCommand cfg SubjectCommandEvent {sceSubjectName = subjectName}
               )
-        "disable-subject" ->
+        _ | cmdName == cmdDisableSubject ->
           case extractIntegerOption "id" intr of
             Nothing ->
               ("Please provide a subject ID.", "[Subject]", pure ())
@@ -515,11 +536,12 @@ dispatchSlashCommand cfg intr cmdName = do
                 "[Subject]",
                 dcOnDisableSubjectCommand cfg DisableSubjectCommandEvent {dsceSubjectId = sid}
               )
-        "list-subjects" ->
-          ( "Fetching enabled subjects...",
-            "[Subject]",
-            dcOnListSubjectsCommand cfg
-          )
+        _
+          | cmdName == cmdListSubjects ->
+              ( "Fetching enabled subjects...",
+                "[Subject]",
+                dcOnListSubjectsCommand cfg
+              )
         _ ->
           ("Unknown command.", "[Discord]", pure ())
   void $
