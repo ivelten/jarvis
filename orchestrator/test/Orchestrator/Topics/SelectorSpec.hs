@@ -99,6 +99,7 @@ spec = do
             Subject
               { subjectName = "Haskell Basics",
                 subjectInterestScore = score,
+                subjectEnabled = True,
                 subjectCreatedAt = epoch,
                 subjectUpdatedAt = epoch
               }
@@ -123,6 +124,7 @@ spec = do
             Subject
               { subjectName = "Monads",
                 subjectInterestScore = score,
+                subjectEnabled = True,
                 subjectCreatedAt = epoch,
                 subjectUpdatedAt = epoch
               }
@@ -130,6 +132,7 @@ spec = do
             Subject
               { subjectName = "Error Handling",
                 subjectInterestScore = score,
+                subjectEnabled = True,
                 subjectCreatedAt = epoch,
                 subjectUpdatedAt = epoch
               }
@@ -151,9 +154,9 @@ spec = do
       it "returns subjects ordered by interest score descending" $ do
         let mkScore n = either (error . unpack) id (mkInterestScore n)
         runDb pool $ do
-          insert_ Subject {subjectName = "Low", subjectInterestScore = mkScore 1, subjectCreatedAt = epoch, subjectUpdatedAt = epoch}
-          insert_ Subject {subjectName = "High", subjectInterestScore = mkScore 5, subjectCreatedAt = epoch, subjectUpdatedAt = epoch}
-          insert_ Subject {subjectName = "Mid", subjectInterestScore = mkScore 3, subjectCreatedAt = epoch, subjectUpdatedAt = epoch}
+          insert_ Subject {subjectName = "Low", subjectInterestScore = mkScore 1, subjectEnabled = True, subjectCreatedAt = epoch, subjectUpdatedAt = epoch}
+          insert_ Subject {subjectName = "High", subjectInterestScore = mkScore 5, subjectEnabled = True, subjectCreatedAt = epoch, subjectUpdatedAt = epoch}
+          insert_ Subject {subjectName = "Mid", subjectInterestScore = mkScore 3, subjectEnabled = True, subjectCreatedAt = epoch, subjectUpdatedAt = epoch}
         results <- runDb pool topSubjects
         map (subjectName . entityVal) results `shouldBe` ["High", "Mid", "Low"]
 
@@ -166,6 +169,7 @@ spec = do
                   Subject
                     { subjectName = "Subject " <> pack (show (i :: Int)),
                       subjectInterestScore = mkScore (((i - 1) `mod` 5) + 1),
+                      subjectEnabled = True,
                       subjectCreatedAt = epoch,
                       subjectUpdatedAt = epoch
                     }

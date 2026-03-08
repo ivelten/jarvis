@@ -49,10 +49,10 @@ ingestDiscoveredContent aiCfg = do
   (tokensUsed, discovered) <- liftIO $ discoverContent aiCfg names
   recordDiscovery tokensUsed discovered
 
--- | Return up to 10 subjects ordered by interest score descending.
+-- | Return up to 10 enabled subjects ordered by interest score descending.
 -- This is the set passed to the AI discovery prompt on each run.
 topSubjects :: SqlPersistT IO [Entity Subject]
-topSubjects = selectList [] [Desc SubjectInterestScore, LimitTo 10]
+topSubjects = selectList [SubjectEnabled ==. True] [Desc SubjectInterestScore, LimitTo 10]
 
 -- | Persist a list of discovered content items and record a 'ContentSearchAiAnalysis'
 -- telemetry row.  Separated from 'ingestDiscoveredContent' so it can be tested

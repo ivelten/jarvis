@@ -32,6 +32,7 @@ share
 Subject
   name          Text
   interestScore InterestScore
+  enabled       Bool default=True
   createdAt     UTCTime
   updatedAt     UTCTime
   UniqueSubjectName name

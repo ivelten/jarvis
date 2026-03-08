@@ -9,9 +9,11 @@ module Orchestrator.Discord.Bot
     RejectReviewEvent (..),
     ReviseReviewEvent (..),
     SubjectCommandEvent (..),
+    DisableSubjectCommandEvent (..),
     mkDiscordConfig,
     registerForReview,
     sendInteractionMessage,
+    sendInteractionFile,
     sendThreadMessage,
     isApprovalMessage,
     buildContextMessage,
@@ -25,6 +27,7 @@ import Control.Exception (SomeException, displayException, try)
 import Control.Monad (forever, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask, runReaderT)
+import Data.Int (Int64)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -78,6 +81,12 @@ newtype SubjectCommandEvent = SubjectCommandEvent
     sceSubjectName :: Text
   }
 
+-- | Payload for the @\/disable-subject@ slash command callback.
+newtype DisableSubjectCommandEvent = DisableSubjectCommandEvent
+  { -- | The integer ID of the subject to disable.
+    dsceSubjectId :: Int64
+  }
+
 -- | Payload for the approve-review callback.
 data ApproveReviewEvent = ApproveReviewEvent
   { -- | Discord thread ID where the reaction or message arrived.
@@ -123,6 +132,10 @@ data DiscordConfig = DiscordConfig
     dcOnDraftCommand :: IO (),
     -- | IO action invoked when the @\/subject@ slash command is used.
     dcOnSubjectCommand :: !(SubjectCommandEvent -> IO ()),
+    -- | IO action invoked when the @\/disable-subject@ slash command is used.
+    dcOnDisableSubjectCommand :: !(DisableSubjectCommandEvent -> IO ()),
+    -- | IO action invoked when the @\/list-subjects@ slash command is used.
+    dcOnListSubjectsCommand :: IO (),
     -- | Called when an approve reaction or approval message arrives.
     dcOnApproveReview :: !(ApproveReviewEvent -> IO ()),
     -- | Called when a reject reaction arrives.
@@ -154,6 +167,10 @@ data DiscordBotSettings = DiscordBotSettings
     dbsOnDraftCommand :: IO (),
     -- | IO action invoked when the @\/subject@ slash command is used.
     dbsOnSubjectCommand :: !(SubjectCommandEvent -> IO ()),
+    -- | IO action invoked when the @\/disable-subject@ slash command is used.
+    dbsOnDisableSubjectCommand :: !(DisableSubjectCommandEvent -> IO ()),
+    -- | IO action invoked when the @\/list-subjects@ slash command is used.
+    dbsOnListSubjectsCommand :: IO (),
     -- | Called when a draft is approved (reaction or approval phrase).
     dbsOnApproveReview :: ApproveReviewEvent -> IO (),
     -- | Called when a draft is rejected (reaction).
@@ -178,6 +195,8 @@ mkDiscordConfig DiscordBotSettings {..} = do
         dcOnDiscoverCommand = dbsOnDiscoverCommand,
         dcOnDraftCommand = dbsOnDraftCommand,
         dcOnSubjectCommand = dbsOnSubjectCommand,
+        dcOnDisableSubjectCommand = dbsOnDisableSubjectCommand,
+        dcOnListSubjectsCommand = dbsOnListSubjectsCommand,
         dcOnApproveReview = dbsOnApproveReview,
         dcOnRejectReview = dbsOnRejectReview,
         dcOnReviseRequest = dbsOnReviseRequest
@@ -378,42 +397,76 @@ registerSlashCommands appId cfg = do
   let gid = mkGuildId (dcGuildId cfg)
       cmds =
         [ ("discover", "Manually trigger content discovery"),
-          ("draft", "Manually trigger post draft generation")
+          ("draft", "Manually trigger post draft generation"),
+          ("list-subjects", "List all enabled subjects")
         ]
-  mapM_ (registerOne gid) cmds
-  registerSubjectCommand gid
+  mapM_ (registerSimpleCommand appId gid) cmds
+  registerSubjectCommand appId gid
+  registerDisableSubjectCommand appId gid
   liftIO $ putStrLn "[Discord] Slash commands registered."
-  where
-    registerOne gid (name, desc) =
-      case createChatInput name desc of
-        Nothing ->
-          liftIO $ putStrLn $ "[Discord] WARNING: could not build slash command: " <> T.unpack name
-        Just cmd ->
-          void $ restCall (CreateGuildApplicationCommand appId gid cmd)
-    registerSubjectCommand gid =
-      case createChatInput "subject" "Add a new subject of interest for the blog" of
-        Nothing ->
-          liftIO $ putStrLn "[Discord] WARNING: could not build subject slash command"
-        Just cmd -> do
-          let cmdWithOptions =
-                cmd
-                  { createOptions =
-                      Just
-                        ( OptionsValues
-                            [ OptionValueString
-                                { optionValueName = "name",
-                                  optionValueLocalizedName = Nothing,
-                                  optionValueDescription = "The subject name to add (e.g. \"Haskell Concurrency\")",
-                                  optionValueLocalizedDescription = Nothing,
-                                  optionValueRequired = True,
-                                  optionValueStringChoices = Left False,
-                                  optionValueStringMinLen = Nothing,
-                                  optionValueStringMaxLen = Nothing
-                                }
-                            ]
-                        )
-                  }
-          void $ restCall (CreateGuildApplicationCommand appId gid cmdWithOptions)
+
+-- | Register a simple slash command with no options.
+registerSimpleCommand :: ApplicationId -> GuildId -> (Text, Text) -> DiscordHandler ()
+registerSimpleCommand appId gid (name, desc) =
+  case createChatInput name desc of
+    Nothing ->
+      liftIO $ putStrLn $ "[Discord] WARNING: could not build slash command: " <> T.unpack name
+    Just cmd ->
+      void $ restCall (CreateGuildApplicationCommand appId gid cmd)
+
+-- | Register the @\/subject@ slash command with a required string @name@ option.
+registerSubjectCommand :: ApplicationId -> GuildId -> DiscordHandler ()
+registerSubjectCommand appId gid =
+  case createChatInput "subject" "Add a new subject of interest for the blog" of
+    Nothing ->
+      liftIO $ putStrLn "[Discord] WARNING: could not build subject slash command"
+    Just cmd -> do
+      let cmdWithOptions =
+            cmd
+              { createOptions =
+                  Just
+                    ( OptionsValues
+                        [ OptionValueString
+                            { optionValueName = "name",
+                              optionValueLocalizedName = Nothing,
+                              optionValueDescription = "The subject name to add (e.g. \"Haskell Concurrency\")",
+                              optionValueLocalizedDescription = Nothing,
+                              optionValueRequired = True,
+                              optionValueStringChoices = Left False,
+                              optionValueStringMinLen = Nothing,
+                              optionValueStringMaxLen = Nothing
+                            }
+                        ]
+                    )
+              }
+      void $ restCall (CreateGuildApplicationCommand appId gid cmdWithOptions)
+
+-- | Register the @\/disable-subject@ slash command with a required integer @id@ option.
+registerDisableSubjectCommand :: ApplicationId -> GuildId -> DiscordHandler ()
+registerDisableSubjectCommand appId gid =
+  case createChatInput "disable-subject" "Disable a subject by ID" of
+    Nothing ->
+      liftIO $ putStrLn "[Discord] WARNING: could not build disable-subject slash command"
+    Just cmd -> do
+      let cmdWithOptions =
+            cmd
+              { createOptions =
+                  Just
+                    ( OptionsValues
+                        [ OptionValueInteger
+                            { optionValueName = "id",
+                              optionValueLocalizedName = Nothing,
+                              optionValueDescription = "The ID of the subject to disable",
+                              optionValueLocalizedDescription = Nothing,
+                              optionValueRequired = True,
+                              optionValueIntegerChoices = Left False,
+                              optionValueIntegerMinVal = Nothing,
+                              optionValueIntegerMaxVal = Nothing
+                            }
+                        ]
+                    )
+              }
+      void $ restCall (CreateGuildApplicationCommand appId gid cmdWithOptions)
 
 -- | Route an incoming 'Interaction' to the appropriate slash-command handler.
 -- Commands are only processed when they originate from the configured
@@ -453,6 +506,20 @@ dispatchSlashCommand cfg intr cmdName = do
                 "[Subject]",
                 dcOnSubjectCommand cfg SubjectCommandEvent {sceSubjectName = subjectName}
               )
+        "disable-subject" ->
+          case extractIntegerOption "id" intr of
+            Nothing ->
+              ("Please provide a subject ID.", "[Subject]", pure ())
+            Just sid ->
+              ( "Disabling subject " <> T.pack (show sid) <> "...",
+                "[Subject]",
+                dcOnDisableSubjectCommand cfg DisableSubjectCommandEvent {dsceSubjectId = sid}
+              )
+        "list-subjects" ->
+          ( "Fetching enabled subjects...",
+            "[Subject]",
+            dcOnListSubjectsCommand cfg
+          )
         _ ->
           ("Unknown command.", "[Discord]", pure ())
   void $
@@ -469,6 +536,12 @@ extractStringOption optName InteractionApplicationCommand {applicationCommandDat
   listToMaybe [s | OptionDataValueString {optionDataValueName = n, optionDataValueString = Right s} <- opts, n == optName]
 extractStringOption _ _ = Nothing
 
+-- | Extract a named integer option value from an interaction's option data.
+extractIntegerOption :: Text -> Interaction -> Maybe Int64
+extractIntegerOption optName InteractionApplicationCommand {applicationCommandData = ApplicationCommandDataChatInput {optionsData = Just (OptionsDataValues opts)}} =
+  listToMaybe [fromIntegral n | OptionDataValueInteger {optionDataValueName = nm, optionDataValueInteger = Right n} <- opts, nm == optName]
+extractIntegerOption _ _ = Nothing
+
 -- | Post a plain-text notice to the interaction channel from any IO context.
 -- Blocks until the bot is connected (i.e. 'dcHandle' is filled).
 -- Exceptions are logged but never re-thrown.
@@ -477,6 +550,15 @@ sendInteractionMessage cfg msg = do
   hdl <- readMVar (dcHandle cfg)
   tryLog "[Discord] WARNING: failed to send interaction message" $
     restCallIO hdl (CreateMessage (mkChannelId (dcInteractionChannelId cfg)) msg)
+
+-- | Post a file attachment to the interaction channel from any IO context.
+-- Blocks until the bot is connected (i.e. 'dcHandle' is filled).
+-- Exceptions are logged but never re-thrown.
+sendInteractionFile :: DiscordConfig -> Text -> Text -> Text -> IO ()
+sendInteractionFile cfg filename caption content = do
+  hdl <- readMVar (dcHandle cfg)
+  tryLog "[Discord] WARNING: failed to send interaction file" $
+    postAsFile hdl (mkChannelId (dcInteractionChannelId cfg)) caption filename content
 
 -- ---------------------------------------------------------------------------
 -- Utilities

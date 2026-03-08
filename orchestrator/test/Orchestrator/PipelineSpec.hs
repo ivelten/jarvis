@@ -10,15 +10,15 @@ import Control.Concurrent.MVar
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
-import Database.Persist.Sql (Entity (..), Filter, entityVal, insert, selectList, toSqlKey)
+import Database.Persist.Sql (Entity (..), Filter, entityVal, fromSqlKey, get, insert, selectList, toSqlKey)
 import Network.HTTP.Client (defaultManagerSettings, newManager)
 import Orchestrator.AI.Client (AiConfig (..), GeneratedDraft (..))
 import Orchestrator.Database.Connection (DbPool, runDb)
 import Orchestrator.Database.Entities
 import Orchestrator.Database.Models
-import Orchestrator.Discord.Bot (DiscordBotSettings (..), DiscordConfig (..), RevisionResult (..), SubjectCommandEvent (..), mkDiscordConfig)
+import Orchestrator.Discord.Bot (DisableSubjectCommandEvent (..), DiscordBotSettings (..), DiscordConfig (..), RevisionResult (..), SubjectCommandEvent (..), mkDiscordConfig)
 import Orchestrator.GitHub.Client (GitHubConfig (..))
-import Orchestrator.Pipeline (PipelineEnv (..), PublishDraftRequest (..), RenderedDraft (..), createSubject, persistDraftAnalysis, renderDraftFiles)
+import Orchestrator.Pipeline (PipelineEnv (..), PublishDraftRequest (..), RenderedDraft (..), createSubject, disableSubject, persistDraftAnalysis, renderDraftFiles)
 import Test.Hspec
 import TestHelpers
 
@@ -108,6 +108,18 @@ spec = do
         rows <- runDb pool $ selectList ([] :: [Filter Subject]) []
         length rows `shouldBe` 2
 
+    describe "disableSubject" $ do
+      it "sets enabled=False on an existing subject" $ do
+        env <- testPipelineEnv pool
+        key <- runDb pool $ insert Subject {subjectName = "Rust", subjectInterestScore = either (error . T.unpack) id (mkInterestScore 3), subjectEnabled = True, subjectCreatedAt = epoch, subjectUpdatedAt = epoch}
+        disableSubject env (DisableSubjectCommandEvent (fromSqlKey key))
+        mRow <- runDb pool $ get key
+        fmap subjectEnabled mRow `shouldBe` Just False
+
+      it "does not crash when subject ID does not exist" $ do
+        env <- testPipelineEnv pool
+        disableSubject env (DisableSubjectCommandEvent 99999) `shouldReturn` ()
+
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
@@ -153,6 +165,8 @@ testPipelineEnv pool = do
           dbsOnDiscoverCommand = pure (),
           dbsOnDraftCommand = pure (),
           dbsOnSubjectCommand = \_ -> pure (),
+          dbsOnDisableSubjectCommand = \_ -> pure (),
+          dbsOnListSubjectsCommand = pure (),
           dbsOnApproveReview = \_ -> pure (),
           dbsOnRejectReview = \_ -> pure (),
           dbsOnReviseRequest = \_ -> pure ReviewNotActive

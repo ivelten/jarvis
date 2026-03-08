@@ -22,17 +22,20 @@ module Orchestrator.Pipeline
     PublishDraftRequest (..),
     DraftingStats (..),
     createSubject,
+    disableSubject,
+    listEnabledSubjects,
   )
 where
 
 import Control.Exception (SomeException, displayException, try)
 import Control.Monad (forM_)
+import Data.Int (Int64)
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, getCurrentTime)
 import Database.Persist (Entity (..), entityKey, entityVal, get, insert, insertUnique, insert_, selectFirst, selectList, update, (=.), (==.))
-import Database.Persist.Sql (SqlPersistT)
+import Database.Persist.Sql (SqlPersistT, fromSqlKey, toSqlKey)
 import Orchestrator.AI.Client
   ( AiConfig,
     DiscoveredContent (..),
@@ -50,7 +53,7 @@ import Orchestrator.Database.Models
     TagList (..),
     mkInterestScore,
   )
-import Orchestrator.Discord.Bot (ApproveReviewEvent (..), DiscordConfig, RejectReviewEvent (..), ReviewRequest (..), ReviseReviewEvent (..), RevisionResult (..), SubjectCommandEvent (..), registerForReview, sendInteractionMessage, sendThreadMessage)
+import Orchestrator.Discord.Bot (ApproveReviewEvent (..), DisableSubjectCommandEvent (..), DiscordConfig, RejectReviewEvent (..), ReviewRequest (..), ReviseReviewEvent (..), RevisionResult (..), SubjectCommandEvent (..), registerForReview, sendInteractionFile, sendInteractionMessage, sendThreadMessage)
 import Orchestrator.GitHub.Client (GitHubConfig, commitPost, triggerDeploy)
 import Orchestrator.Posts.Generator (HugoPostMeta (..), renderHugoPost)
 import Orchestrator.TextUtils (emojiApprove, emojiQueue, emojiReject, emojiSearch, emojiWarning, splitTitle, toSlug, truncateText)
@@ -551,6 +554,33 @@ rcToDiscovered rc =
       dcSubjects = []
     }
 
+-- | Disable an existing 'Subject' by its Int64 key.
+-- Posts a confirmation or not-found message to the interaction channel.
+disableSubject :: PipelineEnv -> DisableSubjectCommandEvent -> IO ()
+disableSubject PipelineEnv {..} DisableSubjectCommandEvent {..} = do
+  let subjectKey = toSqlKey dsceSubjectId :: SubjectId
+  mSubject <- runDb pipeDbPool $ get subjectKey
+  case mSubject of
+    Nothing ->
+      sendInteractionMessage pipeDcCfg $
+        emojiWarning <> " Subject with ID " <> T.pack (show dsceSubjectId) <> " not found."
+    Just _ -> do
+      runDb pipeDbPool $ update subjectKey [SubjectEnabled =. False]
+      sendInteractionMessage pipeDcCfg $
+        emojiApprove <> " Subject " <> T.pack (show dsceSubjectId) <> " disabled."
+
+-- | Post a Markdown table of all enabled subjects to the interaction channel.
+listEnabledSubjects :: PipelineEnv -> IO ()
+listEnabledSubjects PipelineEnv {..} = do
+  subjects <- runDb pipeDbPool $ selectList [SubjectEnabled ==. True] []
+  let content = T.unlines [formatRow s | s <- subjects]
+  sendInteractionFile pipeDcCfg "subjects.md" "**Enabled subjects:**" content
+  where
+    formatRow (Entity k v) =
+      T.pack (show (fromSqlKey k :: Int64))
+        <> ". "
+        <> subjectName v
+
 -- | Create a new 'Subject' with interest score 3.
 -- Posts a confirmation or duplicate-warning message to the interaction channel.
 createSubject :: PipelineEnv -> SubjectCommandEvent -> IO ()
@@ -563,6 +593,7 @@ createSubject PipelineEnv {..} SubjectCommandEvent {..} = do
         Subject
           { subjectName = sceSubjectName,
             subjectInterestScore = score,
+            subjectEnabled = True,
             subjectCreatedAt = now,
             subjectUpdatedAt = now
           }

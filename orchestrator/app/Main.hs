@@ -14,7 +14,7 @@ import Orchestrator.AI.Client (AiConfig (..))
 import Orchestrator.Database.Connection (createPool, migrateDatabase)
 import Orchestrator.Discord.Bot (DiscordBotSettings (..), mkDiscordConfig, startBot)
 import Orchestrator.GitHub.Client (GitHubConfig (..), defaultApiBase)
-import Orchestrator.Pipeline (PipelineEnv (..), createSubject, handleApproveReview, handleRejectReview, handleReviseRequest, retryFailedDrafts, runDiscovery, runDraftGeneration)
+import Orchestrator.Pipeline (PipelineEnv (..), createSubject, disableSubject, handleApproveReview, handleRejectReview, handleReviseRequest, listEnabledSubjects, retryFailedDrafts, runDiscovery, runDraftGeneration)
 import System.Envy (FromEnv (..), decodeEnv, env, envMaybe)
 import System.Exit (exitFailure)
 import System.IO (BufferMode (..), hSetBuffering, stdout)
@@ -166,6 +166,8 @@ main = do
               dbsOnDiscoverCommand = runDiscovery pipeEnv,
               dbsOnDraftCommand = runDraftGeneration pipeEnv,
               dbsOnSubjectCommand = createSubject pipeEnv,
+              dbsOnDisableSubjectCommand = disableSubject pipeEnv,
+              dbsOnListSubjectsCommand = listEnabledSubjects pipeEnv,
               dbsOnApproveReview = handleApproveReview pipeEnv,
               dbsOnRejectReview = handleRejectReview pipeEnv,
               dbsOnReviseRequest = handleReviseRequest pipeEnv
