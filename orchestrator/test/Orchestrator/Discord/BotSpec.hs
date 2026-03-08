@@ -11,7 +11,6 @@ import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as T
 import Orchestrator.Discord.Bot
-import Orchestrator.TextUtils (emojiApprove, emojiReject)
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -34,7 +33,8 @@ testSettings =
       dbsOnListSubjectsCommand = pure (),
       dbsOnApproveReview = \_ -> pure (),
       dbsOnRejectReview = \_ -> pure (),
-      dbsOnReviseRequest = \_ -> pure ReviewNotActive
+      dbsOnReviseRequest = \_ -> pure ReviewNotActive,
+      dbsOnCustomPostRequest = \_ -> pure ()
     }
 
 -- | Minimal 'ReviewRequest' with a no-op 'rrOnThreadCreated'.
@@ -66,14 +66,14 @@ spec = do
       calledWith <- newIORef ("" :: Text)
       let settings = testSettings {dbsOnApproveReview = \ev -> writeIORef calledWith (aprThreadId ev)}
       cfg <- mkDiscordConfig settings
-      dcOnApproveReview cfg ApproveReviewEvent {aprThreadId = "thread-42", aprTriggerText = emojiApprove}
+      dcOnApproveReview cfg ApproveReviewEvent {aprThreadId = "thread-42", aprTriggerText = "approve"}
       readIORef calledWith `shouldReturn` "thread-42"
 
     it "stores the reject handler from settings" $ do
       calledWith <- newIORef ("" :: Text)
       let settings = testSettings {dbsOnRejectReview = \ev -> writeIORef calledWith (rejThreadId ev)}
       cfg <- mkDiscordConfig settings
-      dcOnRejectReview cfg RejectReviewEvent {rejThreadId = "thread-99", rejReason = emojiReject}
+      dcOnRejectReview cfg RejectReviewEvent {rejThreadId = "thread-99", rejReason = "reject"}
       readIORef calledWith `shouldReturn` "thread-99"
 
     it "stores the revise handler from settings" $ do
@@ -102,7 +102,21 @@ spec = do
     it "is case-insensitive" $
       isApprovalMessage "APPROVE" `shouldBe` True
 
-  describe "registerForReview" $ do
+  describe "isRejectionMessage" $ do
+    it "recognises 'reject'" $
+      isRejectionMessage "reject this" `shouldBe` True
+
+    it "recognises 'discard'" $
+      isRejectionMessage "discard" `shouldBe` True
+
+    it "recognises 'cancel'" $
+      isRejectionMessage "cancel" `shouldBe` True
+
+    it "does not match arbitrary feedback" $
+      isRejectionMessage "can you expand the introduction?" `shouldBe` False
+
+    it "is case-insensitive" $
+      isRejectionMessage "REJECT" `shouldBe` True
     it "queues the request with the correct title and body" $ do
       cfg <- mkDiscordConfig testSettings
       registerForReview cfg (minimalReq "My Title" "My Body")

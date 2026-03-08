@@ -8,6 +8,7 @@ module Orchestrator.TextUtils
     emojiReject,
     emojiRevise,
     emojiSearch,
+    emojiStar,
     emojiWarning,
   )
 where
@@ -58,11 +59,12 @@ toSlug =
 -- Discord emoji constants --------------------------------------------------
 
 -- | Unicode emoji constants for use in Discord messages and reactions.
-emojiApprove, emojiDraft, emojiQueue, emojiReject, emojiRevise, emojiSearch, emojiWarning :: Text
+emojiApprove, emojiDraft, emojiQueue, emojiReject, emojiRevise, emojiSearch, emojiStar, emojiWarning :: Text
 emojiApprove = "\x2705" -- ✅
 emojiReject = "\x274c" -- ❌
 emojiDraft = "\x1f4dd" -- 📝
 emojiQueue = "\x1f4ec" -- 📬
 emojiRevise = "\x270f\xfe0f" -- ✏️
-emojiSearch = "\x1f50d" -- �🔍
+emojiSearch = "\x1f50d" -- 🔍
+emojiStar = "\x2b50" -- ⭐
 emojiWarning = "\x26a0\xfe0f" -- ⚠️

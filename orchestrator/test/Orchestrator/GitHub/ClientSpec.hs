@@ -22,6 +22,7 @@ import Network.HTTP.Client (Manager, defaultManagerSettings, newManager)
 import qualified Network.Socket as NS
 import qualified Network.Socket.ByteString as NSB
 import Orchestrator.GitHub.Client
+import Orchestrator.IOUtils (tryIO)
 import Orchestrator.TextUtils (emojiDraft)
 import Test.Hspec
 
@@ -233,7 +234,7 @@ withMockServer responses action =
       pure sock
 
     acceptLoop sock queue = do
-      result <- try (NS.accept sock) :: IO (Either SomeException (NS.Socket, NS.SockAddr))
+      result <- tryIO (NS.accept sock)
       case result of
         Left _ -> pure () -- socket closed; accept loop exits cleanly
         Right (conn, _) -> do

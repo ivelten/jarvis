@@ -16,8 +16,11 @@ module Orchestrator.Pipeline
     handleApproveReview,
     handleRejectReview,
     handleReviseRequest,
+    handleCustomPostRequest,
     persistDraftAnalysis,
     renderDraftFiles,
+    atomicPersistDraft,
+    PersistDraftRequest (..),
     RenderedDraft (..),
     PublishDraftRequest (..),
     DraftingStats (..),
@@ -27,7 +30,7 @@ module Orchestrator.Pipeline
   )
 where
 
-import Control.Exception (SomeException, displayException, try)
+import Control.Exception (SomeException, displayException)
 import Control.Monad (forM_)
 import Data.Int (Int64)
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
@@ -41,6 +44,7 @@ import Orchestrator.AI.Client
     DiscoveredContent (..),
     GeneratedDraft (..),
     ReviseRequest (..),
+    generateCustomDraft,
     generateDraft,
     reviseDraft,
   )
@@ -53,10 +57,11 @@ import Orchestrator.Database.Models
     TagList (..),
     mkInterestScore,
   )
-import Orchestrator.Discord.Bot (ApproveReviewEvent (..), DisableSubjectCommandEvent (..), DiscordConfig, RejectReviewEvent (..), ReviewRequest (..), ReviseReviewEvent (..), RevisionResult (..), SubjectCommandEvent (..), registerForReview, sendInteractionFile, sendInteractionMessage, sendThreadMessage)
+import Orchestrator.Discord.Bot (ApproveReviewEvent (..), CustomPostRequestEvent (..), DisableSubjectCommandEvent (..), DiscordConfig, RejectReviewEvent (..), ReviewRequest (..), ReviseReviewEvent (..), RevisionResult (..), SubjectCommandEvent (..), activateCustomReview, closeThread, registerForReview, sendInteractionFile, sendInteractionMessage, sendThreadMessage)
 import Orchestrator.GitHub.Client (GitHubConfig, commitPost, triggerDeploy)
+import Orchestrator.IOUtils (tryIO)
 import Orchestrator.Posts.Generator (HugoPostMeta (..), renderHugoPost)
-import Orchestrator.TextUtils (emojiApprove, emojiQueue, emojiReject, emojiSearch, emojiWarning, splitTitle, toSlug, truncateText)
+import Orchestrator.TextUtils (emojiApprove, emojiDraft, emojiQueue, emojiReject, emojiSearch, emojiStar, emojiWarning, splitTitle, toSlug, truncateText)
 import Orchestrator.Topics.Selector (DiscoveryStats (..), ingestDiscoveredContent, pendingContent)
 
 -- ---------------------------------------------------------------------------
@@ -129,9 +134,9 @@ runDraftGeneration env@PipelineEnv {..} = do
 -- Database-backed event handlers
 -- ---------------------------------------------------------------------------
 
--- | Called by the Discord bot when an approve reaction or approval message
--- arrives.  Looks up the active 'PostDraft' by thread ID, reads the current
--- bodies from the DB, and calls 'publishDraft'.
+-- | Called by the Discord bot when an approval message arrives.  Looks up the active 'PostDraft' by thread ID, reads the current
+-- bodies from the DB, and calls 'publishDraft'.  Works for both source-based
+-- drafts and custom (source-free) posts.
 handleApproveReview :: PipelineEnv -> ApproveReviewEvent -> IO ()
 handleApproveReview env@PipelineEnv {..} ApproveReviewEvent {..} = do
   mDraft <-
@@ -142,35 +147,27 @@ handleApproveReview env@PipelineEnv {..} ApproveReviewEvent {..} = do
   case mDraft of
     Nothing -> putStrLn $ "[Drafts] No active review for thread " <> T.unpack aprThreadId
     Just (Entity pdKey pd) -> do
-      srcRows <- runDb pipeDbPool $ selectList [PostDraftSourcePostDraftId ==. pdKey] []
-      case listToMaybe srcRows of
-        Nothing ->
-          putStrLn $
-            "[Drafts] No source content for draft '"
-              <> T.unpack (postDraftTitle pd)
-              <> "'"
-        Just (Entity _ src) -> do
-          let rcKey = postDraftSourceRawContentId src
-              bodyEn = fromMaybe "" (postDraftContentMarkdownEn pd)
-              bodyPtBr = fromMaybe "" (postDraftContentMarkdownPtBr pd)
-              tags = unTagList (postDraftSuggestedTags pd)
-          insertComment env pdKey CommentAuthorUser aprTriggerText
-          sendThreadMessage pipeDcCfg aprThreadId $
-            emojiApprove <> " **Draft approved!** Publishing now — this thread is closed."
-          publishDraft
-            env
-            PublishDraftRequest
-              { pubRcKey = rcKey,
-                pubDraftKey = pdKey,
-                pubCreatedAt = postDraftCreatedAt pd,
-                pubBodyEn = bodyEn,
-                pubBodyPtBr = bodyPtBr,
-                pubTags = tags,
-                pubThreadId = Just aprThreadId
-              }
+      let bodyEn = fromMaybe "" (postDraftContentMarkdownEn pd)
+          bodyPtBr = fromMaybe "" (postDraftContentMarkdownPtBr pd)
+          tags = unTagList (postDraftSuggestedTags pd)
+      insertComment env pdKey CommentAuthorUser aprTriggerText
+      sendThreadMessage pipeDcCfg aprThreadId $
+        emojiApprove <> " **Draft approved!** Publishing now — this thread is closed."
+      publishDraft
+        env
+        PublishDraftRequest
+          { pubDraftKey = pdKey,
+            pubCreatedAt = postDraftCreatedAt pd,
+            pubBodyEn = bodyEn,
+            pubBodyPtBr = bodyPtBr,
+            pubTags = tags,
+            pubThreadId = Just aprThreadId
+          }
+      closeThread pipeDcCfg aprThreadId
 
--- | Called by the Discord bot when a reject reaction arrives.
+-- | Called by the Discord bot when a rejection message arrives.
 -- Looks up the active 'PostDraft' by thread ID and calls 'rejectDraft'.
+-- For custom (source-free) posts, only the draft itself is rejected.
 handleRejectReview :: PipelineEnv -> RejectReviewEvent -> IO ()
 handleRejectReview env@PipelineEnv {..} RejectReviewEvent {..} = do
   mDraft <-
@@ -181,15 +178,17 @@ handleRejectReview env@PipelineEnv {..} RejectReviewEvent {..} = do
   case mDraft of
     Nothing -> putStrLn $ "[Drafts] No active review for thread " <> T.unpack rejThreadId
     Just (Entity pdKey _pd) -> do
-      srcRows <- runDb pipeDbPool $ selectList [PostDraftSourcePostDraftId ==. pdKey] []
-      case listToMaybe srcRows of
-        Nothing -> putStrLn "[Drafts] No source content for draft"
-        Just (Entity _ src) -> do
-          let rcKey = postDraftSourceRawContentId src
-          insertComment env pdKey CommentAuthorUser rejReason
-          rejectDraft env rcKey pdKey rejReason
-          sendThreadMessage pipeDcCfg rejThreadId $
-            emojiReject <> " **Draft rejected.** This thread has been closed."
+      insertComment env pdKey CommentAuthorUser rejReason
+      sendThreadMessage pipeDcCfg rejThreadId $
+        emojiReject <> " **Draft rejected.** This thread has been closed."
+      mSrc <- runDb pipeDbPool $ listToMaybe <$> selectList [PostDraftSourcePostDraftId ==. pdKey] []
+      case mSrc of
+        Nothing ->
+          -- Custom post: no source content to update, just mark the draft rejected.
+          rejectDraftOnly env pdKey rejReason
+        Just (Entity _ src) ->
+          rejectDraft env (postDraftSourceRawContentId src) pdKey rejReason
+      closeThread pipeDcCfg rejThreadId
 
 -- | Called by the Discord bot when a non-approval message arrives in a review
 -- thread.  Looks up the active 'PostDraft' by thread ID, reads the current
@@ -211,8 +210,7 @@ handleReviseRequest env@PipelineEnv {..} ReviseReviewEvent {..} = do
           bodyPtBr = fromMaybe "" (postDraftContentMarkdownPtBr pd)
       insertComment env pdKey CommentAuthorUser rvsFeedback
       result <-
-        try (reviseDraft pipeAiCfg ReviseRequest {rvBodyEn = bodyEn, rvBodyPtBr = bodyPtBr, rvFeedback = rvsFeedback}) ::
-          IO (Either SomeException GeneratedDraft)
+        tryIO (reviseDraft pipeAiCfg ReviseRequest {rvBodyEn = bodyEn, rvBodyPtBr = bodyPtBr, rvFeedback = rvsFeedback})
       case result of
         Left ex -> do
           let errMsg = T.pack (displayException ex)
@@ -258,7 +256,7 @@ processDraft env@PipelineEnv {..} rcKey rc = do
                 atomicPersistDraft
                   env
                   PersistDraftRequest
-                    { perRcKey = rcKey,
+                    { perRcKey = Just rcKey,
                       perDraft = draft,
                       perCreatedAt = now,
                       perThreadId = threadId
@@ -271,7 +269,8 @@ processDraft env@PipelineEnv {..} rcKey rc = do
 
 -- | All data needed to atomically persist a new draft along with its Discord thread ID.
 data PersistDraftRequest = PersistDraftRequest
-  { perRcKey :: !(Key RawContent),
+  { -- | Source content key.  'Nothing' for custom (source-free) posts.
+    perRcKey :: !(Maybe (Key RawContent)),
     perDraft :: !GeneratedDraft,
     perCreatedAt :: !UTCTime,
     perThreadId :: !Text
@@ -280,20 +279,17 @@ data PersistDraftRequest = PersistDraftRequest
 -- | Atomically persist the 'PostDraft' together with its Discord thread ID.
 --
 -- Runs a single database transaction that:
--- * Marks the source 'RawContent' as 'ContentDrafted'.
 -- * Inserts the 'PostDraft' with 'DraftReviewing' status and the supplied
 --   @threadId@ already set, so the record never exists without a thread ID.
--- * Copies subject associations from the source content item.
+-- * For source-based drafts (@perRcKey = Just rcKey@):
+--     * Marks the 'RawContent' as 'ContentDrafted'.
+--     * Copies subject associations from the source content item.
+--     * Links the draft to the source via 'PostDraftSource'.
 -- * Inserts the initial 'DraftAiAnalysis' telemetry row.
 atomicPersistDraft :: PipelineEnv -> PersistDraftRequest -> IO (Key PostDraft)
 atomicPersistDraft PipelineEnv {..} PersistDraftRequest {..} = do
   now <- getCurrentTime
   runDb pipeDbPool $ do
-    update
-      perRcKey
-      [ RawContentStatus =. ContentDrafted,
-        RawContentUpdatedAt =. now
-      ]
     pdKey <-
       insert
         PostDraft
@@ -309,22 +305,28 @@ atomicPersistDraft PipelineEnv {..} PersistDraftRequest {..} = do
             postDraftCreatedAt = perCreatedAt,
             postDraftUpdatedAt = now
           }
-    -- Copy subject associations from the source content item.
-    rcSubjects <- selectList [RawContentSubjectRawContentId ==. perRcKey] []
-    mapM_
-      ( \e ->
-          insert_
-            PostDraftSubject
-              { postDraftSubjectPostDraftId = pdKey,
-                postDraftSubjectSubjectId = rawContentSubjectSubjectId (entityVal e)
-              }
-      )
-      rcSubjects
-    insert_
-      PostDraftSource
-        { postDraftSourcePostDraftId = pdKey,
-          postDraftSourceRawContentId = perRcKey
-        }
+    -- Source-specific steps: update content status, copy subjects, link source.
+    forM_ perRcKey $ \rcKey -> do
+      update
+        rcKey
+        [ RawContentStatus =. ContentDrafted,
+          RawContentUpdatedAt =. now
+        ]
+      rcSubjects <- selectList [RawContentSubjectRawContentId ==. rcKey] []
+      mapM_
+        ( \e ->
+            insert_
+              PostDraftSubject
+                { postDraftSubjectPostDraftId = pdKey,
+                  postDraftSubjectSubjectId = rawContentSubjectSubjectId (entityVal e)
+                }
+        )
+        rcSubjects
+      insert_
+        PostDraftSource
+          { postDraftSourcePostDraftId = pdKey,
+            postDraftSourceRawContentId = rcKey
+          }
     persistDraftAnalysis pdKey perDraft now
     pure pdKey
 
@@ -369,8 +371,7 @@ insertComment PipelineEnv {..} postDraftKey author msg = do
 
 -- | All data needed to commit a draft to GitHub and mark it published.
 data PublishDraftRequest = PublishDraftRequest
-  { pubRcKey :: !(Key RawContent),
-    pubDraftKey :: !(Key PostDraft),
+  { pubDraftKey :: !(Key PostDraft),
     pubCreatedAt :: !UTCTime,
     pubBodyEn :: !Text,
     pubBodyPtBr :: !Text,
@@ -394,7 +395,7 @@ publishDraft env@PipelineEnv {..} req@PublishDraftRequest {..} = do
   runDb pipeDbPool $
     update pubDraftKey [PostDraftStatus =. DraftApproved, PostDraftUpdatedAt =. approvedAt]
   commitResult <-
-    try (commitRenderedFiles env rendered) :: IO (Either SomeException ())
+    tryIO (commitRenderedFiles env rendered)
   case commitResult of
     Left ex -> onCommitFailure env pubDraftKey ex
     Right () -> onCommitSuccess env req rendered
@@ -462,7 +463,7 @@ onCommitSuccess PipelineEnv {..} PublishDraftRequest {..} RenderedDraft {..} = d
         PostDraftUpdatedAt =. publishedAt'
       ]
   putStrLn "[Drafts] Post committed to GitHub. Triggering deploy workflow..."
-  deployResult <- try (triggerDeploy pipeGhCfg) :: IO (Either SomeException ())
+  deployResult <- tryIO (triggerDeploy pipeGhCfg)
   case deployResult of
     Left ex -> do
       -- The post is already committed; a deploy failure is non-fatal.
@@ -494,33 +495,26 @@ retryFailedDrafts env@PipelineEnv {..} = do
       mapM_ retryOne drafts
   where
     retryOne (Entity pdKey pd) = do
-      srcRows <- runDb pipeDbPool $ selectList [PostDraftSourcePostDraftId ==. pdKey] []
-      case listToMaybe srcRows of
-        Nothing -> putStrLn $ "[Retry] No source content for draft '" <> T.unpack (postDraftTitle pd) <> "'; skipping."
-        Just (Entity _ src) -> do
-          let rcKey = postDraftSourceRawContentId src
-              bodyEn = fromMaybe "" (postDraftContentMarkdownEn pd)
-              bodyPtBr = fromMaybe "" (postDraftContentMarkdownPtBr pd)
-              tags = unTagList (postDraftSuggestedTags pd)
-          putStrLn $ "[Retry] Retrying publish for: '" <> T.unpack (postDraftTitle pd) <> "'"
-          result <-
-            try
-              ( publishDraft
-                  env
-                  PublishDraftRequest
-                    { pubRcKey = rcKey,
-                      pubDraftKey = pdKey,
-                      pubCreatedAt = postDraftCreatedAt pd,
-                      pubBodyEn = bodyEn,
-                      pubBodyPtBr = bodyPtBr,
-                      pubTags = tags,
-                      pubThreadId = postDraftDiscordThreadId pd
-                    }
-              ) ::
-              IO (Either SomeException ())
-          case result of
-            Left ex -> putStrLn $ "[Retry] Publish still failing for '" <> T.unpack (postDraftTitle pd) <> "': " <> displayException ex
-            Right () -> putStrLn $ "[Retry] Successfully published '" <> T.unpack (postDraftTitle pd) <> "'."
+      let bodyEn = fromMaybe "" (postDraftContentMarkdownEn pd)
+          bodyPtBr = fromMaybe "" (postDraftContentMarkdownPtBr pd)
+          tags = unTagList (postDraftSuggestedTags pd)
+      putStrLn $ "[Retry] Retrying publish for: '" <> T.unpack (postDraftTitle pd) <> "'"
+      result <-
+        tryIO
+          ( publishDraft
+              env
+              PublishDraftRequest
+                { pubDraftKey = pdKey,
+                  pubCreatedAt = postDraftCreatedAt pd,
+                  pubBodyEn = bodyEn,
+                  pubBodyPtBr = bodyPtBr,
+                  pubTags = tags,
+                  pubThreadId = postDraftDiscordThreadId pd
+                }
+          )
+      case result of
+        Left ex -> putStrLn $ "[Retry] Publish still failing for '" <> T.unpack (postDraftTitle pd) <> "': " <> displayException ex
+        Right () -> putStrLn $ "[Retry] Successfully published '" <> T.unpack (postDraftTitle pd) <> "'."
 
 -- | Mark the raw content and post draft as rejected.
 rejectDraft :: PipelineEnv -> Key RawContent -> Key PostDraft -> Text -> IO ()
@@ -538,6 +532,102 @@ rejectDraft PipelineEnv {..} rcKey postDraftKey reason = do
       [ PostDraftStatus =. DraftRejected,
         PostDraftUpdatedAt =. rejectedAt
       ]
+
+-- | Mark only the post draft as rejected (used for custom posts that have no
+-- associated 'RawContent' to update).
+rejectDraftOnly :: PipelineEnv -> Key PostDraft -> Text -> IO ()
+rejectDraftOnly PipelineEnv {..} postDraftKey reason = do
+  putStrLn $ "[Drafts] Custom draft rejected. Reason: " <> T.unpack reason
+  rejectedAt <- getCurrentTime
+  runDb pipeDbPool $
+    update
+      postDraftKey
+      [ PostDraftStatus =. DraftRejected,
+        PostDraftUpdatedAt =. rejectedAt
+      ]
+
+-- | Handle a new user-created forum thread: generate a bilingual blog post
+-- from the thread title (as a hint) and the first message (as instructions),
+-- persist the draft, and post it back to the same thread for the normal
+-- review flow.
+--
+-- Idempotent: if the thread already has a 'PostDraft' (any status), the
+-- handler logs and notifies the user without creating a second draft.
+handleCustomPostRequest :: PipelineEnv -> CustomPostRequestEvent -> IO ()
+handleCustomPostRequest env@PipelineEnv {..} evt@CustomPostRequestEvent {..} = do
+  putStrLn $ "[CustomPost] New thread created: " <> T.unpack cpThreadId
+  mExisting <-
+    runDb pipeDbPool $
+      selectFirst [PostDraftDiscordThreadId ==. Just cpThreadId] []
+  case (mExisting :: Maybe (Entity PostDraft)) of
+    Just _ -> do
+      putStrLn $ "[CustomPost] Thread " <> T.unpack cpThreadId <> " already has a draft; ignoring."
+      sendThreadMessage pipeDcCfg cpThreadId $
+        emojiWarning <> " This thread already has a draft associated with it."
+    Nothing -> do
+      mDraft <- customPostGenerate env evt
+      mapM_ (customPostPersistAndActivate env evt) mDraft
+
+-- | Full lifecycle for a custom post request: generate → persist → activate review.
+customPostGenerate :: PipelineEnv -> CustomPostRequestEvent -> IO (Maybe GeneratedDraft)
+customPostGenerate PipelineEnv {..} CustomPostRequestEvent {..} = do
+  putStrLn $ "[CustomPost] Generating draft for: \"" <> T.unpack cpTitleHint <> "\""
+  sendThreadMessage pipeDcCfg cpThreadId $
+    emojiQueue <> " **Generating post draft…** This may take a moment."
+  result <-
+    tryIO (generateCustomDraft pipeAiCfg cpTitleHint cpInstructions)
+  case result of
+    Left ex -> do
+      let errMsg = T.pack (displayException ex)
+      putStrLn $ "[CustomPost] Generation failed: " <> T.unpack errMsg
+      sendThreadMessage pipeDcCfg cpThreadId $
+        emojiWarning <> " **Draft generation failed:** " <> errMsg
+      pure Nothing
+    Right draft -> pure (Just draft)
+
+-- | Persist the generated draft and activate the review thread with the draft content.
+customPostPersistAndActivate :: PipelineEnv -> CustomPostRequestEvent -> GeneratedDraft -> IO ()
+customPostPersistAndActivate env@PipelineEnv {..} CustomPostRequestEvent {..} draft = do
+  now <- getCurrentTime
+  persistResult <-
+    tryIO
+      ( atomicPersistDraft
+          env
+          PersistDraftRequest
+            { perRcKey = Nothing,
+              perDraft = draft,
+              perCreatedAt = now,
+              perThreadId = cpThreadId
+            }
+      )
+  case persistResult of
+    Left ex -> do
+      let errMsg = T.pack (displayException ex)
+      putStrLn $ "[CustomPost] Failed to persist draft: " <> T.unpack errMsg
+      sendThreadMessage pipeDcCfg cpThreadId $
+        emojiWarning <> " **Failed to save draft:** " <> errMsg
+    Right _ -> do
+      let tagsNote
+            | null (gdTags draft) = ""
+            | otherwise =
+                "\n**Tags:** "
+                  <> T.intercalate ", " (map (\t -> "`" <> t <> "`") (gdTags draft))
+      sendThreadMessage pipeDcCfg cpThreadId $
+        emojiDraft
+          <> " **Draft ready!** Title: _"
+          <> gdTitle draft
+          <> "_"
+          <> tagsNote
+          <> "\n\nType **approve** to approve, **reject** to reject, or type feedback to request changes."
+      activateCustomReview pipeDcCfg cpThreadId (gdBodyEn draft) (gdBodyPtBr draft)
+      sendInteractionMessage pipeDcCfg $
+        emojiStar
+          <> " **Custom post draft ready for review.** _"
+          <> gdTitle draft
+          <> "_ ("
+          <> T.pack (show (gdTokensUsed draft))
+          <> " tokens used)."
+      putStrLn $ "[CustomPost] Draft ready in thread " <> T.unpack cpThreadId
 
 -- ---------------------------------------------------------------------------
 -- Utilities

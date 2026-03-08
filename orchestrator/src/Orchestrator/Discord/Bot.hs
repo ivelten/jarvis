@@ -8,35 +8,41 @@ module Orchestrator.Discord.Bot
     ApproveReviewEvent (..),
     RejectReviewEvent (..),
     ReviseReviewEvent (..),
+    CustomPostRequestEvent (..),
     SubjectCommandEvent (..),
     DisableSubjectCommandEvent (..),
     mkDiscordConfig,
     registerForReview,
+    activateCustomReview,
     sendInteractionMessage,
     sendInteractionFile,
     sendThreadMessage,
+    closeThread,
     isApprovalMessage,
+    isRejectionMessage,
     buildContextMessage,
     startBot,
   )
 where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
-import Control.Exception (SomeException, displayException, try)
-import Control.Monad (forever, void, when)
+import Control.Exception (displayException, finally)
+import Control.Monad (forever, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask, runReaderT)
 import Data.Int (Int64)
-import Data.Maybe (listToMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import Discord
 import Discord.Interactions
-import Discord.Requests (ApplicationCommandRequest (..), ChannelRequest (..), InteractionResponseRequest (..), MessageDetailedOpts (..), StartThreadForumMediaMessage (..), StartThreadForumMediaOpts (..), StartThreadOpts (..))
+import Discord.Requests (ApplicationCommandRequest (..), ChannelRequest (..), InteractionResponseRequest (..), MessageDetailedOpts (..), ModifyChannelOpts (..), StartThreadForumMediaMessage (..), StartThreadForumMediaOpts (..), StartThreadOpts (..))
 import Discord.Types
-import Orchestrator.TextUtils (emojiApprove, emojiDraft, emojiReject, emojiRevise, emojiWarning)
+import Orchestrator.IOUtils (tryIO, tryLog)
+import Orchestrator.TextUtils (emojiDraft, emojiRevise, emojiWarning)
 
 -- ---------------------------------------------------------------------------
 -- Types
@@ -111,6 +117,19 @@ data ReviseReviewEvent = ReviseReviewEvent
     rvsFeedback :: !Text
   }
 
+-- | Payload for the custom-post-generation callback.
+-- Fired when a new thread is created in the forum channel by the bot owner
+-- (not by the bot itself); the thread title is the title hint and the first
+-- message body is the AI instructions.
+data CustomPostRequestEvent = CustomPostRequestEvent
+  { -- | Discord thread ID of the new thread.
+    cpThreadId :: !Text,
+    -- | Forum thread name — used as a title hint for the AI.
+    cpTitleHint :: !Text,
+    -- | Content of the thread's first message — the AI generation instructions.
+    cpInstructions :: !Text
+  }
+
 -- | Runtime configuration for the Discord bot.
 data DiscordConfig = DiscordConfig
   { -- | Discord bot token (from environment, without the @Bot @ prefix).
@@ -126,6 +145,15 @@ data DiscordConfig = DiscordConfig
     dcOwnerId :: !UserId,
     -- | Internal queue: pipeline puts review requests here.
     dcSendQueue :: !(MVar ReviewRequest),
+    -- | Set of thread IDs created by the bot itself that should be ignored on
+    -- 'ThreadCreate' events.  Populated by 'processReview' immediately after
+    -- the thread is created so the 'ThreadCreate' event handler can skip them.
+    dcSkipThreads :: !(MVar (Set.Set ChannelId)),
+    -- | Set of user-created thread IDs for which a custom-post generation is
+    -- currently in progress.  Prevents duplicate 'ThreadCreate' events (e.g.
+    -- Discord re-fires the event when a URL embed is resolved in the starter
+    -- message) from triggering a second concurrent generation.
+    dcInFlightCustomPosts :: !(MVar (Set.Set ChannelId)),
     -- | Live 'DiscordHandle', filled once the bot connects.  Used by
     -- 'sendInteractionMessage' to post notices from outside the event loop.
     dcHandle :: !(MVar DiscordHandle),
@@ -147,7 +175,12 @@ data DiscordConfig = DiscordConfig
     -- Returns 'ReviewNotActive' if no active review was found (bot ignores),
     -- 'RevisionError' on failure (bot posts an error), or 'RevisionOk' with
     -- the updated bodies (bot posts them to the thread).
-    dcOnReviseRequest :: !(ReviseReviewEvent -> IO RevisionResult)
+    dcOnReviseRequest :: !(ReviseReviewEvent -> IO RevisionResult),
+    -- | Called when a new forum thread is created by the owner (not the bot).
+    -- Receives the thread ID, the thread name as a title hint, and the first
+    -- message content as instructions.  The handler generates a draft and
+    -- posts it back to the same thread.
+    dcOnCustomPostRequest :: !(CustomPostRequestEvent -> IO ())
   }
 
 -- ---------------------------------------------------------------------------
@@ -181,13 +214,17 @@ data DiscordBotSettings = DiscordBotSettings
     -- | Called when a draft is rejected (reaction).
     dbsOnRejectReview :: RejectReviewEvent -> IO (),
     -- | Called when a revision is requested (non-approval thread message).
-    dbsOnReviseRequest :: ReviseReviewEvent -> IO RevisionResult
+    dbsOnReviseRequest :: ReviseReviewEvent -> IO RevisionResult,
+    -- | Called when a new forum thread is created by the owner (not the bot).
+    dbsOnCustomPostRequest :: CustomPostRequestEvent -> IO ()
   }
 
 -- | Smart constructor — allocates the internal communication channels.
 mkDiscordConfig :: DiscordBotSettings -> IO DiscordConfig
 mkDiscordConfig DiscordBotSettings {..} = do
   sendQueue <- newEmptyMVar
+  skipThreads <- newMVar Set.empty
+  inFlight <- newMVar Set.empty
   handleVar <- newEmptyMVar
   pure
     DiscordConfig
@@ -197,6 +234,8 @@ mkDiscordConfig DiscordBotSettings {..} = do
         dcInteractionChannelId = dbsInteractionChannelId,
         dcOwnerId = mkUserId dbsOwnerId,
         dcSendQueue = sendQueue,
+        dcSkipThreads = skipThreads,
+        dcInFlightCustomPosts = inFlight,
         dcHandle = handleVar,
         dcOnDiscoverCommand = dbsOnDiscoverCommand,
         dcOnDraftCommand = dbsOnDraftCommand,
@@ -205,7 +244,8 @@ mkDiscordConfig DiscordBotSettings {..} = do
         dcOnListSubjectsCommand = dbsOnListSubjectsCommand,
         dcOnApproveReview = dbsOnApproveReview,
         dcOnRejectReview = dbsOnRejectReview,
-        dcOnReviseRequest = dbsOnReviseRequest
+        dcOnReviseRequest = dbsOnReviseRequest,
+        dcOnCustomPostRequest = dbsOnCustomPostRequest
       }
 
 -- ---------------------------------------------------------------------------
@@ -216,9 +256,9 @@ mkDiscordConfig DiscordBotSettings {..} = do
 --
 -- The bot posts an embed in the review channel, spawns a thread from that
 -- message, and posts the full draft as the first thread message.  Subsequent
--- reviewer messages in the thread trigger AI revisions via 'dcOnReviseRequest';
--- reacting ✅ or typing an approval phrase calls 'dcOnApproveReview'; reacting
--- ❌ calls 'dcOnRejectReview'.  All three handlers perform their own DB lookups.
+-- reviewer messages in the thread are dispatched to 'dcOnApproveReview',
+-- 'dcOnRejectReview', or 'dcOnReviseRequest' based on the message text.
+-- All three handlers perform their own DB lookups.
 registerForReview :: DiscordConfig -> ReviewRequest -> IO ()
 registerForReview cfg = putMVar (dcSendQueue cfg)
 
@@ -231,6 +271,15 @@ isApprovalMessage t =
     (`T.isInfixOf` T.toLower t)
     ["publish", "approve", "lgtm", "looks good", "ship it", "done", "go ahead", "deploy"]
 
+-- | Pure predicate: does a message text constitute a rejection?
+--
+-- Exported so it can be unit-tested without a Discord connection.
+isRejectionMessage :: Text -> Bool
+isRejectionMessage t =
+  any
+    (`T.isInfixOf` T.toLower t)
+    ["reject", "discard", "cancel", "abort", "drop"]
+
 -- | Start the long-running Discord bot event loop.
 -- This function blocks indefinitely; call it on the main thread or a dedicated thread.
 startBot :: DiscordConfig -> IO ()
@@ -241,8 +290,7 @@ startBot cfg = do
         { discordToken = "Bot " <> dcBotToken cfg,
           discordGatewayIntent =
             def
-              { gatewayIntentMessageReactions = True,
-                gatewayIntentMessageChanges = True,
+              { gatewayIntentMessageChanges = True,
                 gatewayIntentMessageContent = True
               },
           discordOnStart = botWorker cfg,
@@ -271,7 +319,7 @@ drainQueue :: DiscordHandle -> DiscordConfig -> IO ()
 drainQueue hdl cfg = forever $ do
   rr <- takeMVar (dcSendQueue cfg)
   putStrLn $ "[Discord] Dequeued review request: " <> T.unpack (rrTitle rr)
-  result <- try (processReview hdl cfg rr) :: IO (Either SomeException ())
+  result <- tryIO (processReview hdl cfg rr)
   case result of
     Left ex -> putStrLn $ "[Discord] drainQueue exception: " <> displayException ex
     Right () -> pure ()
@@ -282,14 +330,15 @@ processReview hdl cfg rr@ReviewRequest {..} = do
   thread <- createReviewThread hdl cfg rr
   let tid = channelId thread
       key = showId tid
-      starterMsgId = DiscordId (unId tid) :: MessageId
+  -- Register in the skip set before the ThreadCreate event can be processed.
+  modifyMVar_ (dcSkipThreads cfg) $ pure . Set.insert tid
   putStrLn $ "[Discord] Thread created (tid=" <> T.unpack key <> "), running on-created callback..."
-  persistResult <- try (rrOnThreadCreated key) :: IO (Either SomeException ())
+  persistResult <- tryIO (rrOnThreadCreated key)
   case persistResult of
     Left ex ->
       putStrLn $ "[Discord] ERROR: on-thread-created callback failed; draft not persisted: " <> displayException ex
     Right () ->
-      activateReview hdl cfg rr tid key starterMsgId
+      activateReview hdl cfg rr tid key
 
 -- | Create the forum thread. Throws 'IOError' if the Discord API call fails.
 createReviewThread :: DiscordHandle -> DiscordConfig -> ReviewRequest -> IO Channel
@@ -301,7 +350,7 @@ createReviewThread hdl cfg ReviewRequest {..} =
     forumMsg =
       StartThreadForumMediaMessage
         { startThreadForumMediaMessageContent =
-            emojiDraft <> " **" <> rrTitle <> "**\n\nReact " <> emojiApprove <> " to approve, " <> emojiReject <> " to reject, or type feedback in this thread.",
+            emojiDraft <> " **" <> rrTitle <> "**\n\nType **approve** to approve, **reject** to reject, or type feedback to request changes.",
           startThreadForumMediaMessageEmbeds = Nothing,
           startThreadForumMediaMessageAllowedMentions = Nothing,
           startThreadForumMediaMessageComponents = Nothing,
@@ -314,9 +363,9 @@ createReviewThread hdl cfg ReviewRequest {..} =
           startThreadForumMediaAppliedTags = Nothing
         }
 
--- | Post draft files and add emoji reactions to the starter message.
-activateReview :: DiscordHandle -> DiscordConfig -> ReviewRequest -> ChannelId -> Text -> MessageId -> IO ()
-activateReview hdl _cfg rr tid _key starterMsgId = do
+-- | Post draft files to the review thread.
+activateReview :: DiscordHandle -> DiscordConfig -> ReviewRequest -> ChannelId -> Text -> IO ()
+activateReview hdl _cfg rr tid _key = do
   putStrLn "[Discord] Draft persisted. Posting draft bodies to thread..."
   tryLog "[Discord] ERROR: failed to post context info" $
     restCallIO hdl (CreateMessage tid (buildContextMessage rr))
@@ -324,27 +373,19 @@ activateReview hdl _cfg rr tid _key starterMsgId = do
     postAsFile hdl tid (emojiDraft <> " **Draft (EN):**") "draft-en.md" (rrBodyEn rr)
   tryLog "[Discord] ERROR: failed to post PT-BR draft" $
     postAsFile hdl tid (emojiDraft <> " **Draft (PT-BR):**") "draft-pt-br.md" (rrBodyPtBr rr)
-  threadDelay 2_000_000
-  tryLog "[Discord] WARNING: failed to add approve reaction" $
-    restCallIO hdl (CreateReaction (tid, starterMsgId) emojiApprove)
-  tryLog "[Discord] WARNING: failed to add reject reaction" $
-    restCallIO hdl (CreateReaction (tid, starterMsgId) emojiReject)
   putStrLn "[Discord] Review setup complete."
 
 -- | Handle incoming Discord events.
 --
--- * 'MessageReactionAdd': approve (✅) or reject (❌) by a non-bot user;
---   dispatches to 'dcOnApproveReview' or 'dcOnRejectReview' which look up
---   the active draft from the database.
--- * 'MessageCreate': approval phrase triggers 'dcOnApproveReview'; anything
---   else triggers 'dcOnReviseRequest' and the bot posts the revised bodies.
+-- * 'ThreadCreate': if the thread is in the forum channel and was not created
+--   by the bot, fetches the starter message and dispatches to 'dcOnCustomPostRequest'.
+-- * 'MessageCreate': approval phrase triggers 'dcOnApproveReview'; rejection
+--   phrase triggers 'dcOnRejectReview'; anything else triggers 'dcOnReviseRequest'
+--   and the bot posts the revised bodies.
 eventHandler :: DiscordConfig -> Event -> DiscordHandler ()
-eventHandler cfg (MessageReactionAdd ri) = do
-  cache <- readCache
-  let botId = userId (cacheCurrentUser cache)
-  when (reactionUserId ri /= botId && reactionUserId ri == dcOwnerId cfg) $
-    liftIO $
-      handleReactionEvent cfg ri
+eventHandler cfg (ThreadCreate chan) = do
+  hdl <- ask
+  liftIO $ handleThreadCreate cfg hdl chan
 eventHandler cfg (MessageCreate m) = do
   cache <- readCache
   let botId = userId (cacheCurrentUser cache)
@@ -357,20 +398,51 @@ eventHandler cfg (InteractionCreate intr) =
   handleInteraction cfg intr
 eventHandler _ _ = pure ()
 
--- | Dispatch a reaction event to the approve or reject callback.
-handleReactionEvent :: DiscordConfig -> ReactionInfo -> IO ()
-handleReactionEvent cfg ri = do
-  let threadId = showId (reactionChannelId ri)
-      emoji = emojiName (reactionEmoji ri)
-  if emoji == emojiApprove
-    then
-      tryLog "[Discord] approve reaction error" $
-        dcOnApproveReview cfg ApproveReviewEvent {aprThreadId = threadId, aprTriggerText = emoji}
-    else
-      tryLog "[Discord] reject reaction error" $
-        dcOnRejectReview cfg RejectReviewEvent {rejThreadId = threadId, rejReason = emoji}
+-- | Handle a 'ThreadCreate' event.  If the thread's parent is the forum channel
+-- and it was not created by the bot (i.e. not in 'dcSkipThreads'), fetch the
+-- starter message and dispatch to 'dcOnCustomPostRequest'.
+handleThreadCreate :: DiscordConfig -> DiscordHandle -> Channel -> IO ()
+handleThreadCreate cfg hdl chan = do
+  let tid = channelId chan
+      threadId = showId tid
+      parentMatch = case channelParentId chan of
+        Just pid -> unId pid == unId (mkChannelId (dcChannelId cfg))
+        Nothing -> False
+  when parentMatch $ do
+    isBotThread <- modifyMVar (dcSkipThreads cfg) $ \s ->
+      if Set.member tid s
+        then pure (Set.delete tid s, True)
+        else pure (s, False)
+    unless isBotThread $ do
+      let titleHint = fromMaybe "" (channelThreadName chan)
+          msgId = DiscordId (unId tid) :: MessageId
+      msgResult <- runReaderT (restCall (GetChannelMessage (tid, msgId))) hdl
+      case msgResult of
+        Left err ->
+          putStrLn $ "[Discord] Could not fetch starter message for custom post (thread=" <> T.unpack threadId <> "): " <> show err
+        Right msg ->
+          when (userId (messageAuthor msg) == dcOwnerId cfg) $ do
+            -- Atomically claim the in-flight slot; skip if a generation is
+            -- already running for this thread (Discord can fire ThreadCreate
+            -- more than once, e.g. when a URL embed is resolved).
+            isNew <- modifyMVar (dcInFlightCustomPosts cfg) $ \s ->
+              if Set.member tid s
+                then pure (s, False)
+                else pure (Set.insert tid s, True)
+            when isNew $
+              finally
+                ( tryLog "[Discord] custom post request error" $
+                    dcOnCustomPostRequest
+                      cfg
+                      CustomPostRequestEvent
+                        { cpThreadId = threadId,
+                          cpTitleHint = titleHint,
+                          cpInstructions = messageContent msg
+                        }
+                )
+                (modifyMVar_ (dcInFlightCustomPosts cfg) $ pure . Set.delete tid)
 
--- | Dispatch a non-bot message to the approve or revise callback, and post
+-- | Dispatch a non-bot message to the approve, reject, or revise callback, and post
 -- the revised draft bodies back to the thread on a successful revision.
 handleMessageEvent :: DiscordConfig -> DiscordHandle -> Message -> IO ()
 handleMessageEvent cfg hdl m = do
@@ -380,9 +452,14 @@ handleMessageEvent cfg hdl m = do
     then
       tryLog "[Discord] approve message error" $
         dcOnApproveReview cfg ApproveReviewEvent {aprThreadId = threadId, aprTriggerText = content}
-    else do
-      result <- dcOnReviseRequest cfg ReviseReviewEvent {rvsThreadId = threadId, rvsFeedback = content}
-      handleRevisionResult hdl (messageChannelId m) result
+    else
+      if isRejectionMessage content
+        then
+          tryLog "[Discord] reject message error" $
+            dcOnRejectReview cfg RejectReviewEvent {rejThreadId = threadId, rejReason = content}
+        else do
+          result <- dcOnReviseRequest cfg ReviseReviewEvent {rvsThreadId = threadId, rvsFeedback = content}
+          handleRevisionResult hdl (messageChannelId m) result
 
 -- | Post the outcome of a revision request back to the thread.
 handleRevisionResult :: DiscordHandle -> ChannelId -> RevisionResult -> IO ()
@@ -399,18 +476,23 @@ handleRevisionResult hdl chanId (RevisionOk newBodyEn newBodyPtBr) = do
 -- Slash command names
 -- ---------------------------------------------------------------------------
 
+-- | Discover command text.
 cmdDiscover :: Text
 cmdDiscover = "discover"
 
+-- | Draft command text.
 cmdDraft :: Text
 cmdDraft = "draft"
 
+-- | Subject command text.
 cmdSubject :: Text
 cmdSubject = "subject"
 
+-- | Disable-subject command text.
 cmdDisableSubject :: Text
 cmdDisableSubject = "disable-subject"
 
+-- | List-subjects command text.
 cmdListSubjects :: Text
 cmdListSubjects = "list-subjects"
 
@@ -616,15 +698,6 @@ interactionUserId (MemberOrUser (Right user)) = Just (userId user)
 showId :: DiscordId a -> Text
 showId i = T.pack $ show $ unSnowflake $ unId i
 
--- | Run an IO action, catching any exception and logging it with the given
--- prefix.  Always continues after logging; use this for non-fatal steps.
-tryLog :: String -> IO () -> IO ()
-tryLog prefix action = do
-  result <- try action :: IO (Either SomeException ())
-  case result of
-    Left ex -> putStrLn $ prefix <> ": " <> displayException ex
-    Right () -> pure ()
-
 -- | Fire a Discord REST call via a raw handle, discarding the result.
 restCallIO :: (FromJSON a) => DiscordHandle -> ChannelRequest a -> IO ()
 restCallIO hdl req = void $ runReaderT (restCall req) hdl
@@ -662,6 +735,20 @@ buildContextMessage ReviewRequest {..} =
       ++ ["**Tags:** " <> T.intercalate ", " (map (\t -> "`" <> t <> "`") rrTags) | not (null rrTags)]
       ++ ["**Subjects:** " <> T.intercalate ", " rrSubjects | not (null rrSubjects)]
 
+-- | Archive and lock a Discord forum thread, moving it to the closed-threads
+-- list.  Exceptions are logged but never re-thrown.
+closeThread :: DiscordConfig -> Text -> IO ()
+closeThread cfg threadId = do
+  hdl <- readMVar (dcHandle cfg)
+  tryLog "[Discord] WARNING: failed to close thread" $
+    restCallIO hdl $
+      ModifyChannel
+        (parseThreadId threadId)
+        def
+          { modifyChannelThreadArchived = Just True,
+            modifyChannelThreadLocked = Just True
+          }
+
 -- | Post a plain-text message to a Discord thread from any IO context.
 -- Blocks until the bot is connected (i.e. 'dcHandle' is filled).
 -- Exceptions are logged but never re-thrown.
@@ -670,6 +757,18 @@ sendThreadMessage cfg threadId msg = do
   hdl <- readMVar (dcHandle cfg)
   tryLog "[Discord] WARNING: failed to send thread message" $
     restCallIO hdl (CreateMessage (parseThreadId threadId) msg)
+
+-- | Post EN and PT-BR draft bodies as file attachments to an existing forum
+-- thread.  Used when a custom post was triggered by a user-created thread.
+activateCustomReview :: DiscordConfig -> Text -> Text -> Text -> IO ()
+activateCustomReview cfg threadId bodyEn bodyPtBr = do
+  hdl <- readMVar (dcHandle cfg)
+  let tid = parseThreadId threadId
+  tryLog "[Discord] ERROR: failed to post EN draft" $
+    postAsFile hdl tid (emojiDraft <> " **Draft (EN):**") "draft-en.md" bodyEn
+  tryLog "[Discord] ERROR: failed to post PT-BR draft" $
+    postAsFile hdl tid (emojiDraft <> " **Draft (PT-BR):**") "draft-pt-br.md" bodyPtBr
+  putStrLn "[Discord] Custom review activated."
 
 -- | Parse a Discord thread ID (as 'Text') into a 'ChannelId'.
 parseThreadId :: Text -> ChannelId

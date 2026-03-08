@@ -55,6 +55,7 @@ library
     Orchestrator.Database.TH
     Orchestrator.Discord.Bot
     Orchestrator.GitHub.Client
+    Orchestrator.IOUtils
     Orchestrator.Pipeline
     Orchestrator.Posts.Generator
     Orchestrator.TextUtils

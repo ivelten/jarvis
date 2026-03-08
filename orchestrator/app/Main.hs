@@ -14,7 +14,7 @@ import Orchestrator.AI.Client (AiConfig (..))
 import Orchestrator.Database.Connection (createPool, migrateDatabase)
 import Orchestrator.Discord.Bot (DiscordBotSettings (..), mkDiscordConfig, startBot)
 import Orchestrator.GitHub.Client (GitHubConfig (..), defaultApiBase)
-import Orchestrator.Pipeline (PipelineEnv (..), createSubject, disableSubject, handleApproveReview, handleRejectReview, handleReviseRequest, listEnabledSubjects, retryFailedDrafts, runDiscovery, runDraftGeneration)
+import Orchestrator.Pipeline (PipelineEnv (..), createSubject, disableSubject, handleApproveReview, handleCustomPostRequest, handleRejectReview, handleReviseRequest, listEnabledSubjects, retryFailedDrafts, runDiscovery, runDraftGeneration)
 import System.Envy (FromEnv (..), decodeEnv, env, envMaybe)
 import System.Exit (exitFailure)
 import System.IO (BufferMode (..), hSetBuffering, stdout)
@@ -53,7 +53,7 @@ data Config = Config
     -- | Discord text channel ID used for slash commands and bot notices.
     cfgDcInteractionChannelId :: !Int,
     -- | Discord user ID of the bot owner (only this user's interactions are processed).
-    cfgDcOwnerId :: !Word,
+    cfgDcOwnerId :: !Integer,
     -- | How often to run the discovery step, in seconds (default: 86400 = 1 day).
     cfgDiscoveryIntervalSecs :: !Int,
     -- | How often to run the draft-generation step, in seconds (default: 43200 = 12 hours).
@@ -166,7 +166,7 @@ main = do
               dbsGuildId = fromIntegral (cfgDcGuildId cfg),
               dbsChannelId = fromIntegral (cfgDcChannelId cfg),
               dbsInteractionChannelId = fromIntegral (cfgDcInteractionChannelId cfg),
-              dbsOwnerId = cfgDcOwnerId cfg,
+              dbsOwnerId = fromIntegral (cfgDcOwnerId cfg),
               dbsOnDiscoverCommand = runDiscovery pipeEnv,
               dbsOnDraftCommand = runDraftGeneration pipeEnv,
               dbsOnSubjectCommand = createSubject pipeEnv,
@@ -174,7 +174,8 @@ main = do
               dbsOnListSubjectsCommand = listEnabledSubjects pipeEnv,
               dbsOnApproveReview = handleApproveReview pipeEnv,
               dbsOnRejectReview = handleRejectReview pipeEnv,
-              dbsOnReviseRequest = handleReviseRequest pipeEnv
+              dbsOnReviseRequest = handleReviseRequest pipeEnv,
+              dbsOnCustomPostRequest = handleCustomPostRequest pipeEnv
             }
       let pipeEnv =
             PipelineEnv

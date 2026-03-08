@@ -8,6 +8,7 @@ module Orchestrator.AI.Client
     ReviseRequest (..),
     discoverContent,
     generateDraft,
+    generateCustomDraft,
     reviseDraft,
     isRateLimitError,
     isFallbackError,
@@ -167,6 +168,11 @@ draftPromptTemplate = TE.decodeUtf8 $(makeRelativeToProject "prompts/generate_dr
 -- The literals @{{DRAFT_EN}}@, @{{DRAFT_PTBR}}@, and @{{FEEDBACK}}@ are replaced at runtime.
 revisePromptTemplate :: Text
 revisePromptTemplate = TE.decodeUtf8 $(makeRelativeToProject "prompts/revise_draft.txt" >>= embedFile)
+
+-- | Prompt template for 'generateCustomDraft' – embedded from @prompts/custom_post.txt@.
+-- The literals @{{TITLE_HINT}}@ and @{{INSTRUCTIONS}}@ are replaced at runtime.
+customPostPromptTemplate :: Text
+customPostPromptTemplate = TE.decodeUtf8 $(makeRelativeToProject "prompts/custom_post.txt" >>= embedFile)
 
 -- ---------------------------------------------------------------------------
 -- Internal HTTP helpers
@@ -563,6 +569,25 @@ reviseDraft cfg ReviseRequest {..} = do
       T.replace "{{DRAFT_EN}}" rvBodyEn $
         T.replace "{{DRAFT_PTBR}}" rvBodyPtBr $
           T.replace "{{FEEDBACK}}" rvFeedback revisePromptTemplate
+    requestBody' =
+      object
+        [ "contents" .= [userContents prompt],
+          "generationConfig" .= defaultGenerationConfig
+        ]
+
+-- | Ask Gemini to write a bilingual blog post based on custom author instructions.
+--
+-- This is used for on-demand posts initiated from a Discord forum thread:
+-- the thread title becomes the @titleHint@ and the first message becomes
+-- @instructions@.  The AI may refine the title.  No source content is needed.
+generateCustomDraft :: AiConfig -> Text -> Text -> IO GeneratedDraft
+generateCustomDraft cfg titleHint instructions = do
+  (mdText, tokensUsed) <- callGemini cfg requestBody'
+  pure (assembleGeneratedDraft tokensUsed mdText)
+  where
+    prompt =
+      T.replace "{{TITLE_HINT}}" titleHint $
+        T.replace "{{INSTRUCTIONS}}" instructions customPostPromptTemplate
     requestBody' =
       object
         [ "contents" .= [userContents prompt],

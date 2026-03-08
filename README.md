@@ -28,10 +28,10 @@ main thread
 ├── forkIO: Retry worker      (default: every 1 h, sleeps before first run)
 │     └── PostgreSQL (publish_failed drafts) → GitHub → deploy
 └── startBot (blocks main thread)
-      ├── Ready               (registers /discover and /draft slash commands)
-      ├── InteractionCreate   (/discover or /draft in the commands channel)
-      ├── MessageReactionAdd  (✅ / ❌ on review embed)
-      └── MessageCreate       (feedback / approval phrase in thread)
+      ├── Ready               (registers slash commands)
+      ├── InteractionCreate   (/discover, /draft, /subject, etc. in the commands channel)
+      ├── ThreadCreate        (user creates a thread in the forum → custom post flow)
+      └── MessageCreate       (feedback / approve / reject phrase in a review thread)
 ```
 
 > **Note:** all background workers sleep for their full interval on startup before
@@ -41,15 +41,24 @@ main thread
 
 ### Review flow
 
-1. The draft worker picks the next pending content item, calls Gemini to generate a Markdown draft, and creates a new thread in your Discord forum channel with the embed as the starter post.
-2. The full draft is posted as the first reply in that thread.
+1. The draft worker picks the next pending content item, calls Gemini to generate a bilingual (EN + PT-BR) Markdown draft, and creates a new thread in your Discord forum channel.
+2. The full draft is posted as file attachments in that thread.
 3. You can type feedback freely in the thread — Gemini revises the draft and posts the updated version back.
-4. When you are happy, approve in one of two ways:
-   - React with **✅** on the forum post, **or**
-   - Type an approval phrase in the thread (`publish`, `approve`, `lgtm`, `looks good`, `ship it`, `done`, `go ahead`, `deploy`).
-5. The final draft body is committed to GitHub and the deploy workflow is triggered automatically. A notification is posted to your interaction channel when the deploy is dispatched.
+4. When you are happy, type **`approve`** (or any approval phrase such as `publish`, `lgtm`, `looks good`, `ship it`, `done`, `go ahead`, `deploy`) in the thread.
+5. The final draft body is committed to GitHub and the deploy workflow is triggered automatically. A notification is posted to your interaction channel when the deploy is dispatched. The thread is then **automatically archived and locked**.
 
-React with **❌** at any point to reject the draft (it is removed from the queue and logged).
+Type **`reject`** (or `discard`, `cancel`, `abort`, `drop`) at any point to reject the draft — it is marked rejected in the database, logged, and the thread is archived.
+
+### Custom post flow
+
+You can also request a post on a specific topic without going through the discovery queue:
+
+1. **Create a new thread** in the forum channel yourself.
+2. In the thread starter message, describe what you want — the thread title is used as the topic hint and the message body as additional instructions for Gemini.
+3. Jarvis detects the new thread (the `ThreadCreate` event), generates a bilingual draft, and posts it back to the same thread.
+4. The review flow then proceeds identically to the automated draft flow above.
+
+> **Note:** Jarvis only reacts to threads created by the configured `DISCORD_OWNER_ID`. Threads from other users are silently ignored.
 
 ### Publish failure and automatic retry
 
@@ -82,12 +91,11 @@ If the GitHub commit step fails (e.g. due to a network error or a temporary GitH
 2. Open the **Bot** tab → **Reset Token** and copy the value (you will need it for `DISCORD_BOT_TOKEN`).
 3. On the same page, under **Privileged Gateway Intents**, enable:
    - ✅ **Message Content Intent**
-   - ✅ **Server Members Intent**
 4. Open **OAuth2 → URL Generator**, set scopes to `bot` **and** `applications.commands`, and grant these permissions:
    - Send Messages
    - Read Message History
-   - Add Reactions
    - Create Public Threads
+   - Manage Threads
    - Use Slash Commands
 5. Open the generated URL in a browser and invite the bot to your private Discord server.
 
@@ -154,7 +162,7 @@ The script loads `orchestrator/.env` automatically and starts the orchestrator v
 - Check your Discord forum channel — a new forum post appears for the draft.
 - Open the post thread to read the full draft.
 - Type feedback in the thread to request AI revisions.
-- When satisfied, type `publish` (or react ✅) to commit and deploy.
+- When satisfied, type `approve` to commit and deploy. The thread will be archived automatically.
 
 ### Slash commands
 
@@ -169,6 +177,16 @@ Once the bot is running, two slash commands are registered in your guild and ava
 | `/list-subjects` | Posts a numbered list of all currently enabled subjects as a `.md` file. |
 
 All commands are restricted to the owner (`DISCORD_OWNER_ID`) and only work in the interaction channel (`DISCORD_INTERACTION_CHANNEL_ID`). Commands from any other user or channel are silently ignored.
+
+### Approval and rejection keywords
+
+When a review thread is active, plain text messages are interpreted as follows:
+
+| Intent | Keywords (case-insensitive, partial match) |
+| --- | --- |
+| **Approve** | `approve`, `publish`, `lgtm`, `looks good`, `ship it`, `done`, `go ahead`, `deploy` |
+| **Reject** | `reject`, `discard`, `cancel`, `abort`, `drop` |
+| **Revision** | Anything else — treated as feedback and sent to Gemini for a revision. |
 
 ## Configuration reference
 

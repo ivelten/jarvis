@@ -18,7 +18,7 @@ import Orchestrator.Database.Entities
 import Orchestrator.Database.Models
 import Orchestrator.Discord.Bot (DisableSubjectCommandEvent (..), DiscordBotSettings (..), DiscordConfig (..), RevisionResult (..), SubjectCommandEvent (..), mkDiscordConfig)
 import Orchestrator.GitHub.Client (GitHubConfig (..))
-import Orchestrator.Pipeline (PipelineEnv (..), PublishDraftRequest (..), RenderedDraft (..), createSubject, disableSubject, persistDraftAnalysis, renderDraftFiles)
+import Orchestrator.Pipeline (PersistDraftRequest (..), PipelineEnv (..), PublishDraftRequest (..), RenderedDraft (..), atomicPersistDraft, createSubject, disableSubject, persistDraftAnalysis, renderDraftFiles)
 import Test.Hspec
 import TestHelpers
 
@@ -29,8 +29,7 @@ spec = do
   describe "renderDraftFiles" $ do
     let req =
           PublishDraftRequest
-            { pubRcKey = toSqlKey 1,
-              pubDraftKey = toSqlKey 1,
+            { pubDraftKey = toSqlKey 1,
               pubCreatedAt = epoch,
               pubBodyEn = "# My Post Title\n\nEnglish body.",
               pubBodyPtBr = "# Meu Título\n\nCorpo em português.",
@@ -120,6 +119,38 @@ spec = do
         env <- testPipelineEnv pool
         disableSubject env (DisableSubjectCommandEvent 99999) `shouldReturn` ()
 
+    describe "atomicPersistDraft (custom post, no source)" $ do
+      it "inserts a PostDraft row in DraftReviewing status" $ do
+        env <- testPipelineEnv pool
+        _ <- atomicPersistDraft env customReq
+        rows <- runDb pool $ selectList ([] :: [Filter PostDraft]) []
+        length rows `shouldBe` 1
+        postDraftStatus (entityVal (head rows)) `shouldBe` DraftReviewing
+
+      it "stores the thread ID on the draft" $ do
+        env <- testPipelineEnv pool
+        _ <- atomicPersistDraft env customReq
+        rows <- runDb pool $ selectList ([] :: [Filter PostDraft]) []
+        postDraftDiscordThreadId (entityVal (head rows)) `shouldBe` Just "thread-custom-1"
+
+      it "inserts a DraftAiAnalysis telemetry row" $ do
+        env <- testPipelineEnv pool
+        _ <- atomicPersistDraft env customReq
+        rows <- runDb pool $ selectList ([] :: [Filter DraftAiAnalysis]) []
+        length rows `shouldBe` 1
+
+      it "does not insert a PostDraftSource row" $ do
+        env <- testPipelineEnv pool
+        _ <- atomicPersistDraft env customReq
+        rows <- runDb pool $ selectList ([] :: [Filter PostDraftSource]) []
+        length rows `shouldBe` 0
+
+      it "does not insert any RawContent rows" $ do
+        env <- testPipelineEnv pool
+        _ <- atomicPersistDraft env customReq
+        rows <- runDb pool $ selectList ([] :: [Filter RawContent]) []
+        length rows `shouldBe` 0
+
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
@@ -170,7 +201,8 @@ testPipelineEnv pool = do
           dbsOnListSubjectsCommand = pure (),
           dbsOnApproveReview = \_ -> pure (),
           dbsOnRejectReview = \_ -> pure (),
-          dbsOnReviseRequest = \_ -> pure ReviewNotActive
+          dbsOnReviseRequest = \_ -> pure ReviewNotActive,
+          dbsOnCustomPostRequest = \_ -> pure ()
         }
 
 sampleDraft :: Text -> PostDraft
@@ -198,4 +230,13 @@ sampleGenerated =
       gdBodyPtBr = "Algum conteúdo em português.",
       gdTags = ["haskell", "fp"],
       gdTokensUsed = 100
+    }
+
+customReq :: PersistDraftRequest
+customReq =
+  PersistDraftRequest
+    { perRcKey = Nothing,
+      perDraft = sampleGenerated,
+      perCreatedAt = epoch,
+      perThreadId = "thread-custom-1"
     }
