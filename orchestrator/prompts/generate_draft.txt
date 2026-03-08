@@ -16,6 +16,12 @@ Requirements:
   - Length: 1500–2000 words per language version (excluding the TAGS line and separators)
   - End each version with a '## Further Reading' section; list each source as a bullet using the format `- [Source title](url)` — the link text must be the human-readable title, never the raw URL
   - The Portuguese version must be a complete, natural-language translation of the English version (not a machine word-for-word translation); idiomatic Brazilian Portuguese throughout
+  - Markdown formatting rules (strictly enforced):
+    - The post title must be an H1 (`# Title`) — never start with H2 or lower
+    - Every heading marker must be followed by exactly one space before the heading text (e.g. `## Section`, never `##Section`)
+    - Blank lines are required before and after every heading, code block, and list
+    - Fenced code blocks must always specify a language identifier (e.g. ` ```haskell `, never ` ``` ` alone)
+    - Inline code uses single backticks; never use bold or italics as a substitute for code formatting
 
 Output ONLY the following structure (no extra text before or after):
 
