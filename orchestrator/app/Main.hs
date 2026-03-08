@@ -1,10 +1,10 @@
+{-# LANGUAGE RecursiveDo #-}
+
 module Main (main) where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception (SomeException, displayException, try)
-import Control.Monad (join)
 import qualified Data.ByteString.Char8 as BC
-import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -14,7 +14,7 @@ import Orchestrator.AI.Client (AiConfig (..))
 import Orchestrator.Database.Connection (createPool, migrateDatabase)
 import Orchestrator.Discord.Bot (DiscordBotSettings (..), mkDiscordConfig, startBot)
 import Orchestrator.GitHub.Client (GitHubConfig (..), defaultApiBase)
-import Orchestrator.Pipeline (PipelineEnv (..), runDiscovery, runDraftGeneration)
+import Orchestrator.Pipeline (PipelineEnv (..), handleApproveReview, handleRejectReview, handleReviseRequest, retryFailedDrafts, runDiscovery, runDraftGeneration)
 import System.Envy (FromEnv (..), decodeEnv, env, envMaybe)
 import System.Exit (exitFailure)
 import System.IO (BufferMode (..), hSetBuffering, stdout)
@@ -55,7 +55,9 @@ data Config = Config
     -- | How often to run the discovery step, in seconds (default: 86400 = 1 day).
     cfgDiscoveryIntervalSecs :: !Int,
     -- | How often to run the draft-generation step, in seconds (default: 43200 = 12 hours).
-    cfgDraftIntervalSecs :: !Int
+    cfgDraftIntervalSecs :: !Int,
+    -- | How often to retry drafts that failed to publish, in seconds (default: 3600 = 1 hour).
+    cfgRetryIntervalSecs :: !Int
   }
 
 instance FromEnv Config where
@@ -76,6 +78,7 @@ instance FromEnv Config where
       <*> env "DISCORD_INTERACTION_CHANNEL_ID"
       <*> (fromMaybe 86400 <$> envMaybe "DISCOVERY_INTERVAL_SECS")
       <*> (fromMaybe 43200 <$> envMaybe "DRAFT_INTERVAL_SECS")
+      <*> (fromMaybe 3600 <$> envMaybe "RETRY_INTERVAL_SECS")
 
 -- ---------------------------------------------------------------------------
 -- Utilities
@@ -149,37 +152,30 @@ main = do
   let aiCfg = mkAiConfig cfg manager
       ghCfg = mkGhConfig cfg manager
 
-  -- IORef indirection to break the dcCfg <-> pipeEnv circular dependency.
-  -- The bot's slash-command callbacks read these refs at invocation time,
-  -- after the refs have been filled with the real pipeline actions below.
-  discoverRef <- newIORef (pure ())
-  draftRef <- newIORef (pure ())
-
-  dcCfg <-
-    mkDiscordConfig
-      DiscordBotSettings
-        { dbsBotToken = cfgDcBotToken cfg,
-          dbsGuildId = fromIntegral (cfgDcGuildId cfg),
-          dbsChannelId = fromIntegral (cfgDcChannelId cfg),
-          dbsInteractionChannelId = fromIntegral (cfgDcInteractionChannelId cfg),
-          dbsOnDiscoverCommand = join (readIORef discoverRef),
-          dbsOnDraftCommand = join (readIORef draftRef)
-        }
-
   pool <- createPool (BC.pack (cfgDbUrl cfg))
   migrateDatabase pool
   putStrLn "[Jarvis] Database ready."
 
-  let pipeEnv =
-        PipelineEnv
-          { pipeAiCfg = aiCfg,
-            pipeGhCfg = ghCfg,
-            pipeDcCfg = dcCfg,
-            pipeDbPool = pool
-          }
-
-  writeIORef discoverRef (runDiscovery pipeEnv)
-  writeIORef draftRef (runDraftGeneration pipeEnv)
+  rec dcCfg <-
+        mkDiscordConfig
+          DiscordBotSettings
+            { dbsBotToken = cfgDcBotToken cfg,
+              dbsGuildId = fromIntegral (cfgDcGuildId cfg),
+              dbsChannelId = fromIntegral (cfgDcChannelId cfg),
+              dbsInteractionChannelId = fromIntegral (cfgDcInteractionChannelId cfg),
+              dbsOnDiscoverCommand = runDiscovery pipeEnv,
+              dbsOnDraftCommand = runDraftGeneration pipeEnv,
+              dbsOnApproveReview = handleApproveReview pipeEnv,
+              dbsOnRejectReview = handleRejectReview pipeEnv,
+              dbsOnReviseRequest = handleReviseRequest pipeEnv
+            }
+      let pipeEnv =
+            PipelineEnv
+              { pipeAiCfg = aiCfg,
+                pipeGhCfg = ghCfg,
+                pipeDcCfg = dcCfg,
+                pipeDbPool = pool
+              }
 
   _ <-
     forkIO $
@@ -194,6 +190,13 @@ main = do
         "[Drafts]"
         (cfgDraftIntervalSecs cfg)
         (runDraftGeneration pipeEnv)
+
+  _ <-
+    forkIO $
+      scheduledLoop
+        "[Retry]"
+        (cfgRetryIntervalSecs cfg)
+        (retryFailedDrafts pipeEnv)
 
   putStrLn "[Jarvis] All workers started. Discord bot running..."
   startBot dcCfg

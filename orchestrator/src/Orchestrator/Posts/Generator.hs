@@ -1,5 +1,6 @@
 module Orchestrator.Posts.Generator
-  ( buildHugoFrontMatter,
+  ( HugoPostMeta (..),
+    buildHugoFrontMatter,
     renderHugoPost,
   )
 where
@@ -8,16 +9,28 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, defaultTimeLocale, formatTime)
 
+-- | Metadata required to render a Hugo post front-matter block.
+data HugoPostMeta = HugoPostMeta
+  { -- | Post title, written verbatim into the front-matter @title@ field.
+    hpmTitle :: !Text,
+    -- | URL slug, e.g. @"my-post-title"@.
+    hpmSlug :: !Text,
+    -- | Publication date; becomes the front-matter @date@ field.
+    hpmDate :: !UTCTime,
+    -- | List of tags written into the front-matter @tags@ array.
+    hpmTags :: ![Text]
+  }
+
 -- | Build the TOML front-matter block for a Hugo post.
-buildHugoFrontMatter :: Text -> Text -> UTCTime -> [Text] -> Text
-buildHugoFrontMatter title slug date tags =
+buildHugoFrontMatter :: HugoPostMeta -> Text
+buildHugoFrontMatter HugoPostMeta {..} =
   T.unlines
     [ "+++",
-      "title = " <> quote title,
-      "date = " <> T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" date),
+      "title = " <> quote hpmTitle,
+      "date = " <> T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" hpmDate),
       "draft = false",
-      "slug = " <> quote slug,
-      "tags = [" <> T.intercalate ", " (map quote tags) <> "]",
+      "slug = " <> quote hpmSlug,
+      "tags = [" <> T.intercalate ", " (map quote hpmTags) <> "]",
       "+++"
     ]
   where
@@ -25,6 +38,6 @@ buildHugoFrontMatter title slug date tags =
     quote t = "\"" <> T.replace "\\" "\\\\" (T.replace "\"" "\\\"" t) <> "\""
 
 -- | Combine front-matter and body into a full Hugo Markdown file.
-renderHugoPost :: Text -> Text -> UTCTime -> [Text] -> Text -> Text
-renderHugoPost title slug date tags body =
-  buildHugoFrontMatter title slug date tags <> "\n" <> body
+renderHugoPost :: HugoPostMeta -> Text -> Text
+renderHugoPost meta body =
+  buildHugoFrontMatter meta <> "\n" <> body

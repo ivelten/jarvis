@@ -25,6 +25,8 @@ main thread
 │     └── Gemini → PostgreSQL (raw_content)
 ├── forkIO: Draft worker      (default: every 12 h, sleeps before first run)
 │     └── PostgreSQL → Gemini → Discord thread
+├── forkIO: Retry worker      (default: every 1 h, sleeps before first run)
+│     └── PostgreSQL (publish_failed drafts) → GitHub → deploy
 └── startBot (blocks main thread)
       ├── Ready               (registers /discover and /draft slash commands)
       ├── InteractionCreate   (/discover or /draft in the commands channel)
@@ -32,7 +34,7 @@ main thread
       └── MessageCreate       (feedback / approval phrase in thread)
 ```
 
-> **Note:** both background workers sleep for their full interval on startup before
+> **Note:** all background workers sleep for their full interval on startup before
 > running for the first time. This avoids a burst of AI calls every time the
 > process restarts. Use `/discover` or `/draft` in Discord to trigger an
 > immediate run instead.
@@ -45,9 +47,13 @@ main thread
 4. When you are happy, approve in one of two ways:
    - React with **✅** on the forum post, **or**
    - Type an approval phrase in the thread (`publish`, `approve`, `lgtm`, `looks good`, `ship it`, `done`, `go ahead`, `deploy`).
-5. The final draft body is committed to GitHub and the deploy workflow is triggered automatically.
+5. The final draft body is committed to GitHub and the deploy workflow is triggered automatically. A notification is posted to your interaction channel when the deploy is dispatched.
 
 React with **❌** at any point to reject the draft (it is removed from the queue and logged).
+
+### Publish failure and automatic retry
+
+If the GitHub commit step fails (e.g. due to a network error or a temporary GitHub outage), the draft is **not** discarded or reset to a new draft. Instead it is marked `publish_failed` in the database and left untouched. The retry worker (default: every hour) automatically picks up all `publish_failed` drafts and re-attempts the commit and deploy, logging the outcome for each one. Once the commit succeeds the draft transitions to `published` and a notification is posted as normal.
 
 ## Development environment
 
@@ -137,17 +143,7 @@ From the repository root:
 ./run.sh
 ```
 
-The script loads `orchestrator/.env` automatically and starts the orchestrator via `cabal run`. The database schema is migrated on first start. You will see output similar to:
-
-```text
-[Jarvis] Starting orchestrator...
-[Jarvis] Database ready.
-[Jarvis] All workers started. Discord bot running...
-[Discovery] Discovering content via Gemini...
-[Discovery] Done.
-[Drafts] Generating draft for: <title>
-[Drafts] Draft sent to Discord for review.
-```
+The script loads `orchestrator/.env` automatically and starts the orchestrator via `cabal run`. The database schema is migrated on first start.
 
 ### 7. Review and publish
 
@@ -188,6 +184,7 @@ All configuration is read from environment variables. See `.env.example` for the
 | `DISCORD_INTERACTION_CHANNEL_ID` | ✅ | — | Text channel ID for slash commands and bot notices (`/discover`, `/draft`) |
 | `DISCOVERY_INTERVAL_SECS` | | `86400` | Seconds to sleep between discovery runs (first run also delayed) |
 | `DRAFT_INTERVAL_SECS` | | `43200` | Seconds to sleep between draft-generation runs (first run also delayed) |
+| `RETRY_INTERVAL_SECS` | | `3600` | Seconds to sleep between publish-retry runs. The retry worker re-attempts any draft in the `publish_failed` state without generating a new draft or losing the approved content. |
 
 ## Running the tests
 

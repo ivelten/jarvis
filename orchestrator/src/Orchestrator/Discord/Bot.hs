@@ -3,26 +3,27 @@
 module Orchestrator.Discord.Bot
   ( DiscordConfig (..),
     DiscordBotSettings (..),
-    PendingReview (..),
+    RevisionResult (..),
     ReviewRequest (..),
+    ApproveReviewEvent (..),
+    RejectReviewEvent (..),
+    ReviseReviewEvent (..),
     mkDiscordConfig,
     registerForReview,
-    restoreReview,
     sendInteractionMessage,
+    sendThreadMessage,
     isApprovalMessage,
+    buildContextMessage,
     startBot,
   )
 where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar
-import Control.Concurrent.STM
 import Control.Exception (SomeException, displayException, try)
 import Control.Monad (forever, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask, runReaderT)
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
@@ -30,65 +31,67 @@ import Discord
 import Discord.Interactions
 import Discord.Requests (ApplicationCommandRequest (..), ChannelRequest (..), InteractionResponseRequest (..), MessageDetailedOpts (..), StartThreadForumMediaMessage (..), StartThreadForumMediaOpts (..), StartThreadOpts (..))
 import Discord.Types
-import Orchestrator.TextUtils (emojiApprove, emojiDraft, emojiReject, emojiRevise, emojiWarning, truncateText)
-import Text.Read (readMaybe)
+import Orchestrator.TextUtils (emojiApprove, emojiDraft, emojiReject, emojiRevise, emojiWarning)
 
 -- ---------------------------------------------------------------------------
 -- Types
 -- ---------------------------------------------------------------------------
 
--- | State for a draft currently under review in a Discord forum thread.
-data PendingReview = PendingReview
-  { -- | Post title (used for context).
-    prTitle :: !Text,
-    -- | Current English draft body; updated atomically after each AI revision.
-    prCurrentBodyEn :: !(TVar Text),
-    -- | Current Brazilian Portuguese draft body; updated atomically after each AI revision.
-    prCurrentBodyPtBr :: !(TVar Text),
-    -- | Current tags; updated atomically alongside the body after each revision.
-    prCurrentTags :: !(TVar [Text]),
-    -- | Lookup key: forum thread Snowflake as text.  Because in a forum
-    -- channel the thread ID equals the starter message ID, one key serves
-    -- both reaction events and thread-message events.
-    prKey :: !Text,
-    -- | Thread 'ChannelId' for posting revision replies.
-    prThreadId :: !ChannelId,
-    -- | @(currentBodyEn, currentBodyPtBr, feedback) -> (revisedBodyEn, revisedBodyPtBr, revisedTags)@.
-    prRevise :: Text -> Text -> Text -> IO (Text, Text, [Text]),
-    -- | Called with the final bodies and tags when ✅ is received or an approval phrase is typed.
-    prApprove :: Text -> Text -> [Text] -> IO (),
-    -- | Called with the rejection reason when ❌ is received.
-    prReject :: Text -> IO (),
-    -- | Called with the text of each message the human reviewer sends.
-    prOnUserMessage :: Text -> IO (),
-    -- | Called with the English body of each reply posted by the bot (revised drafts).
-    prOnBotMessage :: Text -> IO ()
-  }
+-- | Result returned by 'dcOnReviseRequest' so the bot knows how to respond.
+data RevisionResult
+  = -- | No 'DraftReviewing' draft found for this thread; ignore silently.
+    ReviewNotActive
+  | -- | The AI or pipeline failed; the message is shown to the reviewer.
+    RevisionError !Text
+  | -- | Successful revision; bot posts both updated bodies to the thread.
+    RevisionOk !Text !Text
+  deriving (Show, Eq)
 
 -- | All the information needed to submit a draft for Discord review.
--- Passed to 'registerForReview' as a single record instead of individual arguments.
 data ReviewRequest = ReviewRequest
-  { -- | Post title shown in the embed and as the thread name.
+  { -- | Post title shown as the forum thread name.
     rrTitle :: !Text,
     -- | Full English Markdown draft body.
     rrBodyEn :: !Text,
     -- | Full Brazilian Portuguese Markdown draft body.
     rrBodyPtBr :: !Text,
-    -- | Initial tags from the draft; kept in sync with the body after revisions.
+    -- | Initial tags from the draft.
     rrTags :: ![Text],
-    -- | @(currentBodyEn, currentBodyPtBr, feedback) -> (revisedBodyEn, revisedBodyPtBr, revisedTags)@.
-    rrRevise :: Text -> Text -> Text -> IO (Text, Text, [Text]),
-    -- | Called with the final bodies and tags when the reviewer approves.
-    rrApprove :: Text -> Text -> [Text] -> IO (),
-    -- | Called with the rejection reason when rejected.
-    rrReject :: Text -> IO (),
-    -- | Called with the text of each message the human reviewer sends in the thread.
-    rrOnUserMessage :: Text -> IO (),
-    -- | Called with the English body of each reply the bot posts (i.e. a revised draft).
-    rrOnBotMessage :: Text -> IO (),
+    -- | Title of the source content the draft was based on.
+    rrSourceTitle :: !Text,
+    -- | Summary of the source content.
+    rrSourceSummary :: !Text,
+    -- | URL of the source content.
+    rrSourceUrl :: !Text,
+    -- | Subjects associated with the source content.
+    rrSubjects :: ![Text],
     -- | Called with the Discord thread ID (as 'Text') once the review thread
-    -- has been created.  Useful for persisting the thread ID back to the DB.
+    -- has been created.  Used for persisting the thread ID back to the DB.
     rrOnThreadCreated :: Text -> IO ()
+  }
+
+-- | Payload for the approve-review callback.
+data ApproveReviewEvent = ApproveReviewEvent
+  { -- | Discord thread ID where the reaction or message arrived.
+    aprThreadId :: !Text,
+    -- | The emoji or approval phrase that triggered the event.
+    aprTriggerText :: !Text
+  }
+
+-- | Payload for the reject-review callback.
+data RejectReviewEvent = RejectReviewEvent
+  { -- | Discord thread ID where the reaction arrived.
+    rejThreadId :: !Text,
+    -- | The emoji that triggered the rejection.
+    rejReason :: !Text
+  }
+
+-- | Payload for the revise-review callback.
+data ReviseReviewEvent = ReviseReviewEvent
+  { -- | Discord thread ID where the message was posted.
+    rvsThreadId :: !Text,
+    -- | Reviewer feedback message content.
+    rvsFeedback :: !Text
   }
 
 -- | Runtime configuration for the Discord bot.
@@ -103,17 +106,22 @@ data DiscordConfig = DiscordConfig
     dcInteractionChannelId :: !Word,
     -- | Internal queue: pipeline puts review requests here.
     dcSendQueue :: !(MVar ReviewRequest),
-    -- | Map from forum-thread-ID text to pending review.  Because the forum
-    -- thread ID equals the starter message ID, this single map handles both
-    -- reaction events and thread-message events.
-    dcReviewMap :: !(TVar (Map Text PendingReview)),
     -- | Live 'DiscordHandle', filled once the bot connects.  Used by
     -- 'sendInteractionMessage' to post notices from outside the event loop.
     dcHandle :: !(MVar DiscordHandle),
     -- | IO action invoked when the @\/discover@ slash command is used.
     dcOnDiscoverCommand :: IO (),
     -- | IO action invoked when the @\/draft@ slash command is used.
-    dcOnDraftCommand :: IO ()
+    dcOnDraftCommand :: IO (),
+    -- | Called when an approve reaction or approval message arrives.
+    dcOnApproveReview :: !(ApproveReviewEvent -> IO ()),
+    -- | Called when a reject reaction arrives.
+    dcOnRejectReview :: !(RejectReviewEvent -> IO ()),
+    -- | Called when a non-approval user message arrives in a review thread.
+    -- Returns 'ReviewNotActive' if no active review was found (bot ignores),
+    -- 'RevisionError' on failure (bot posts an error), or 'RevisionOk' with
+    -- the updated bodies (bot posts them to the thread).
+    dcOnReviseRequest :: !(ReviseReviewEvent -> IO RevisionResult)
   }
 
 -- ---------------------------------------------------------------------------
@@ -133,14 +141,19 @@ data DiscordBotSettings = DiscordBotSettings
     -- | IO action invoked when the @\/discover@ slash command is used.
     dbsOnDiscoverCommand :: IO (),
     -- | IO action invoked when the @\/draft@ slash command is used.
-    dbsOnDraftCommand :: IO ()
+    dbsOnDraftCommand :: IO (),
+    -- | Called when a draft is approved (reaction or approval phrase).
+    dbsOnApproveReview :: ApproveReviewEvent -> IO (),
+    -- | Called when a draft is rejected (reaction).
+    dbsOnRejectReview :: RejectReviewEvent -> IO (),
+    -- | Called when a revision is requested (non-approval thread message).
+    dbsOnReviseRequest :: ReviseReviewEvent -> IO RevisionResult
   }
 
 -- | Smart constructor — allocates the internal communication channels.
 mkDiscordConfig :: DiscordBotSettings -> IO DiscordConfig
 mkDiscordConfig DiscordBotSettings {..} = do
   sendQueue <- newEmptyMVar
-  reviewMap <- newTVarIO Map.empty
   handleVar <- newEmptyMVar
   pure
     DiscordConfig
@@ -149,10 +162,12 @@ mkDiscordConfig DiscordBotSettings {..} = do
         dcChannelId = dbsChannelId,
         dcInteractionChannelId = dbsInteractionChannelId,
         dcSendQueue = sendQueue,
-        dcReviewMap = reviewMap,
         dcHandle = handleVar,
         dcOnDiscoverCommand = dbsOnDiscoverCommand,
-        dcOnDraftCommand = dbsOnDraftCommand
+        dcOnDraftCommand = dbsOnDraftCommand,
+        dcOnApproveReview = dbsOnApproveReview,
+        dcOnRejectReview = dbsOnRejectReview,
+        dcOnReviseRequest = dbsOnReviseRequest
       }
 
 -- ---------------------------------------------------------------------------
@@ -163,9 +178,9 @@ mkDiscordConfig DiscordBotSettings {..} = do
 --
 -- The bot posts an embed in the review channel, spawns a thread from that
 -- message, and posts the full draft as the first thread message.  Subsequent
--- reviewer messages in the thread trigger AI revisions.  Reacting ✅ (or
--- typing an approval phrase) passes the final body to 'rrApprove'; reacting
--- ❌ passes the emoji to 'rrReject'.
+-- reviewer messages in the thread trigger AI revisions via 'dcOnReviseRequest';
+-- reacting ✅ or typing an approval phrase calls 'dcOnApproveReview'; reacting
+-- ❌ calls 'dcOnRejectReview'.  All three handlers perform their own DB lookups.
 registerForReview :: DiscordConfig -> ReviewRequest -> IO ()
 registerForReview cfg = putMVar (dcSendQueue cfg)
 
@@ -211,12 +226,9 @@ botWorker cfg = do
   liftIO $ void $ forkIO $ drainQueue hdl cfg
 
 -- | Continuously reads 'ReviewRequest' values from the queue, creates a forum
--- thread with the embed as the starter message, posts the full draft body as a
--- follow-up, and registers the review in 'dcReviewMap'.
---
--- Because Discord forum channels assign the same snowflake to the thread and
--- its starter message, a single map key handles both reaction events and
--- thread-message events.
+-- thread with a plain-text starter message, and posts a context reply followed
+-- by the draft files.  Event callbacks are dispatched via 'DiscordConfig' handlers
+-- that perform all DB lookups on demand.
 drainQueue :: DiscordHandle -> DiscordConfig -> IO ()
 drainQueue hdl cfg = forever $ do
   rr <- takeMVar (dcSendQueue cfg)
@@ -248,17 +260,11 @@ createReviewThread hdl cfg ReviewRequest {..} =
     >>= either (ioError . userError . ("failed to create forum thread: " <>) . show) pure
   where
     chanId = mkChannelId (dcChannelId cfg)
-    embed =
-      def
-        { createEmbedTitle = rrTitle,
-          createEmbedDescription = truncateText 500 rrBodyEn,
-          createEmbedFooterText =
-            "React " <> emojiApprove <> " to approve, " <> emojiReject <> " to reject, or type feedback in the thread."
-        }
     forumMsg =
       StartThreadForumMediaMessage
-        { startThreadForumMediaMessageContent = "",
-          startThreadForumMediaMessageEmbeds = Just [embed],
+        { startThreadForumMediaMessageContent =
+            emojiDraft <> " **" <> rrTitle <> "**\n\nReact " <> emojiApprove <> " to approve, " <> emojiReject <> " to reject, or type feedback in this thread.",
+          startThreadForumMediaMessageEmbeds = Nothing,
           startThreadForumMediaMessageAllowedMentions = Nothing,
           startThreadForumMediaMessageComponents = Nothing,
           startThreadForumMediaMessageStickerIds = Nothing
@@ -270,38 +276,17 @@ createReviewThread hdl cfg ReviewRequest {..} =
           startThreadForumMediaAppliedTags = Nothing
         }
 
--- | Allocate mutable state and build a 'PendingReview' value.
-buildPendingReview :: Text -> ChannelId -> ReviewRequest -> IO PendingReview
-buildPendingReview key tid ReviewRequest {..} = do
-  bodyEnVar <- newTVarIO rrBodyEn
-  bodyPtBrVar <- newTVarIO rrBodyPtBr
-  tagsVar <- newTVarIO rrTags
-  pure
-    PendingReview
-      { prTitle = rrTitle,
-        prCurrentBodyEn = bodyEnVar,
-        prCurrentBodyPtBr = bodyPtBrVar,
-        prCurrentTags = tagsVar,
-        prKey = key,
-        prThreadId = tid,
-        prRevise = rrRevise,
-        prApprove = rrApprove,
-        prReject = rrReject,
-        prOnUserMessage = rrOnUserMessage,
-        prOnBotMessage = rrOnBotMessage
-      }
-
--- | Post draft files, register the pending review, and add emoji reactions.
+-- | Post draft files and add emoji reactions to the starter message.
 activateReview :: DiscordHandle -> DiscordConfig -> ReviewRequest -> ChannelId -> Text -> MessageId -> IO ()
-activateReview hdl cfg rr tid key starterMsgId = do
+activateReview hdl _cfg rr tid _key starterMsgId = do
   putStrLn "[Discord] Draft persisted. Posting draft bodies to thread..."
+  tryLog "[Discord] ERROR: failed to post context info" $
+    restCallIO hdl (CreateMessage tid (buildContextMessage rr))
   tryLog "[Discord] ERROR: failed to post EN draft" $
     postAsFile hdl tid (emojiDraft <> " **Draft (EN):**") "draft-en.md" (rrBodyEn rr)
   tryLog "[Discord] ERROR: failed to post PT-BR draft" $
     postAsFile hdl tid (emojiDraft <> " **Draft (PT-BR):**") "draft-pt-br.md" (rrBodyPtBr rr)
   threadDelay 2_000_000
-  pr <- buildPendingReview key tid rr
-  atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert key pr)
   tryLog "[Discord] WARNING: failed to add approve reaction" $
     restCallIO hdl (CreateReaction (tid, starterMsgId) emojiApprove)
   tryLog "[Discord] WARNING: failed to add reject reaction" $
@@ -310,45 +295,67 @@ activateReview hdl cfg rr tid key starterMsgId = do
 
 -- | Handle incoming Discord events.
 --
--- * 'MessageReactionAdd': approve (✅) or reject (❌) by a non-bot user.
--- * 'MessageCreate': approval phrase triggers the approve callback;
---   anything else triggers an AI revision.
+-- * 'MessageReactionAdd': approve (✅) or reject (❌) by a non-bot user;
+--   dispatches to 'dcOnApproveReview' or 'dcOnRejectReview' which look up
+--   the active draft from the database.
+-- * 'MessageCreate': approval phrase triggers 'dcOnApproveReview'; anything
+--   else triggers 'dcOnReviseRequest' and the bot posts the revised bodies.
 eventHandler :: DiscordConfig -> Event -> DiscordHandler ()
 eventHandler cfg (MessageReactionAdd ri) = do
   cache <- readCache
   let botId = userId (cacheCurrentUser cache)
-  when (reactionUserId ri /= botId) $ do
-    let key = showId (reactionMessageId ri)
-        emoji = emojiName (reactionEmoji ri)
-    mReview <- liftIO $ atomically (lookupAndDeregister cfg key)
-    case mReview of
-      Nothing -> pure ()
-      Just pr ->
-        liftIO $
-          withReregistration cfg key pr "reaction callback" $
-            if emoji == emojiApprove
-              then fireApproval pr emoji
-              else fireRejection pr emoji
+  when (reactionUserId ri /= botId) $
+    liftIO $
+      handleReactionEvent cfg ri
 eventHandler cfg (MessageCreate m) = do
   cache <- readCache
   let botId = userId (cacheCurrentUser cache)
   when (not (userIsBot (messageAuthor m)) && userId (messageAuthor m) /= botId) $ do
-    let key = showId (messageChannelId m)
-        content = messageContent m
-    reviewMap <- liftIO $ readTVarIO (dcReviewMap cfg)
-    case Map.lookup key reviewMap of
-      Nothing -> pure ()
-      Just pr ->
-        if isApprovalMessage content
-          then liftIO $ do
-            atomically $ deregister cfg key
-            withReregistration cfg key pr "approval" $ fireApproval pr content
-          else handleRevision pr content
+    hdl <- ask
+    liftIO $ handleMessageEvent cfg hdl m
 eventHandler cfg (Ready _ _ _ _ _ _ (PartialApplication appId _)) =
   registerSlashCommands appId cfg
 eventHandler cfg (InteractionCreate intr) =
   handleInteraction cfg intr
 eventHandler _ _ = pure ()
+
+-- | Dispatch a reaction event to the approve or reject callback.
+handleReactionEvent :: DiscordConfig -> ReactionInfo -> IO ()
+handleReactionEvent cfg ri = do
+  let threadId = showId (reactionChannelId ri)
+      emoji = emojiName (reactionEmoji ri)
+  if emoji == emojiApprove
+    then
+      tryLog "[Discord] approve reaction error" $
+        dcOnApproveReview cfg ApproveReviewEvent {aprThreadId = threadId, aprTriggerText = emoji}
+    else
+      tryLog "[Discord] reject reaction error" $
+        dcOnRejectReview cfg RejectReviewEvent {rejThreadId = threadId, rejReason = emoji}
+
+-- | Dispatch a non-bot message to the approve or revise callback, and post
+-- the revised draft bodies back to the thread on a successful revision.
+handleMessageEvent :: DiscordConfig -> DiscordHandle -> Message -> IO ()
+handleMessageEvent cfg hdl m = do
+  let threadId = showId (messageChannelId m)
+      content = messageContent m
+  if isApprovalMessage content
+    then
+      tryLog "[Discord] approve message error" $
+        dcOnApproveReview cfg ApproveReviewEvent {aprThreadId = threadId, aprTriggerText = content}
+    else do
+      result <- dcOnReviseRequest cfg ReviseReviewEvent {rvsThreadId = threadId, rvsFeedback = content}
+      handleRevisionResult hdl (messageChannelId m) result
+
+-- | Post the outcome of a revision request back to the thread.
+handleRevisionResult :: DiscordHandle -> ChannelId -> RevisionResult -> IO ()
+handleRevisionResult _ _ ReviewNotActive = pure ()
+handleRevisionResult hdl chanId (RevisionError errMsg) =
+  restCallIO hdl (CreateMessage chanId (emojiWarning <> " " <> errMsg))
+handleRevisionResult hdl chanId (RevisionOk newBodyEn newBodyPtBr) = do
+  tryLog "[Discord] ERROR: failed to post revised EN draft" $
+    postAsFile hdl chanId (emojiRevise <> " **Revised draft (EN):**") "draft-en.md" newBodyEn
+  tryLog "[Discord] ERROR: failed to post revised PT-BR draft" $
+    postAsFile hdl chanId (emojiRevise <> " **Revised draft (PT-BR):**") "draft-pt-br.md" newBodyPtBr
 
 -- | Register the bot's guild slash commands.  Called once from the 'Ready'
 -- event so commands are available immediately without waiting for global
@@ -418,95 +425,9 @@ sendInteractionMessage cfg msg = do
   tryLog "[Discord] WARNING: failed to send interaction message" $
     restCallIO hdl (CreateMessage (mkChannelId (dcInteractionChannelId cfg)) msg)
 
--- | Atomically look up a pending review by key and remove it so the
--- callback cannot fire more than once.
-lookupAndDeregister :: DiscordConfig -> Text -> STM (Maybe PendingReview)
-lookupAndDeregister cfg key = do
-  rm <- readTVar (dcReviewMap cfg)
-  case Map.lookup key rm of
-    Nothing -> pure Nothing
-    Just pr -> do
-      deregister cfg key
-      pure (Just pr)
-
--- | Atomically remove a pending review from 'dcReviewMap'.
-deregister :: DiscordConfig -> Text -> STM ()
-deregister cfg key =
-  modifyTVar' (dcReviewMap cfg) (Map.delete key)
-
--- | Call the AI revision function and post the revised English draft back
--- into the thread.  On failure, post an error message instead.
-handleRevision :: PendingReview -> Text -> DiscordHandler ()
-handleRevision pr feedback = do
-  liftIO $
-    tryLog "[Discord] WARNING: failed to record user message" $
-      prOnUserMessage pr feedback
-  reviseResult <- liftIO $ do
-    currentBodyEn <- readTVarIO (prCurrentBodyEn pr)
-    currentBodyPtBr <- readTVarIO (prCurrentBodyPtBr pr)
-    try (prRevise pr currentBodyEn currentBodyPtBr feedback) :: IO (Either SomeException (Text, Text, [Text]))
-  case reviseResult of
-    Left ex -> do
-      let errMsg = "Could not revise draft: " <> T.pack (displayException ex)
-      liftIO $ putStrLn $ "[Drafts] Gemini error: " <> T.unpack errMsg
-      sendResult <- restCall $ CreateMessage (prThreadId pr) (emojiWarning <> " " <> errMsg)
-      case sendResult of
-        Left e -> liftIO $ putStrLn $ "[Discord] WARNING: also failed to send error message to thread: " <> show e
-        Right _ -> pure ()
-    Right (newBodyEn, newBodyPtBr, newTags) -> do
-      liftIO $ atomically $ do
-        writeTVar (prCurrentBodyEn pr) newBodyEn
-        writeTVar (prCurrentBodyPtBr pr) newBodyPtBr
-        writeTVar (prCurrentTags pr) newTags
-      liftIO $
-        tryLog "[Discord] WARNING: failed to record bot message" $
-          prOnBotMessage pr newBodyEn
-      hdl <- ask
-      liftIO $ do
-        tryLog "[Discord] ERROR: failed to post revised EN draft" $
-          postAsFile hdl (prThreadId pr) (emojiRevise <> " **Revised draft (EN):**") "draft-en.md" newBodyEn
-        tryLog "[Discord] ERROR: failed to post revised PT-BR draft" $
-          postAsFile hdl (prThreadId pr) (emojiRevise <> " **Revised draft (PT-BR):**") "draft-pt-br.md" newBodyPtBr
-
 -- ---------------------------------------------------------------------------
 -- Utilities
 -- ---------------------------------------------------------------------------
-
--- | Re-register a review that already has a Discord forum thread (e.g. after
--- a bot restart).  Unlike 'registerForReview', this does NOT create a new
--- forum thread — it simply inserts a fresh 'PendingReview' into 'dcReviewMap'
--- so that subsequent reactions and messages are handled normally.
---
--- If @tidText@ cannot be parsed as a Discord snowflake the call is a no-op
--- and a warning is printed.
-restoreReview :: DiscordConfig -> Text -> ReviewRequest -> IO ()
-restoreReview cfg tidText ReviewRequest {..} =
-  case readMaybe (T.unpack tidText) :: Maybe Integer of
-    Nothing ->
-      putStrLn $
-        "[Discord] WARNING: could not restore review (unparseable thread ID): "
-          <> T.unpack tidText
-    Just n -> do
-      let tid = DiscordId (Snowflake (fromIntegral n)) :: ChannelId
-      bodyEnVar <- newTVarIO rrBodyEn
-      bodyPtBrVar <- newTVarIO rrBodyPtBr
-      tagsVar <- newTVarIO rrTags
-      let pr =
-            PendingReview
-              { prTitle = rrTitle,
-                prCurrentBodyEn = bodyEnVar,
-                prCurrentBodyPtBr = bodyPtBrVar,
-                prCurrentTags = tagsVar,
-                prKey = tidText,
-                prThreadId = tid,
-                prRevise = rrRevise,
-                prApprove = rrApprove,
-                prReject = rrReject,
-                prOnUserMessage = rrOnUserMessage,
-                prOnBotMessage = rrOnBotMessage
-              }
-      atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert tidText pr)
-      putStrLn $ "[Discord] Restored pending review: " <> T.unpack rrTitle
 
 -- | Convert a raw Word ID to a Discord 'ChannelId'.
 mkChannelId :: Word -> ChannelId
@@ -528,35 +449,6 @@ tryLog prefix action = do
   case result of
     Left ex -> putStrLn $ prefix <> ": " <> displayException ex
     Right () -> pure ()
-
--- | Run an IO action that was preceded by deregistering a 'PendingReview'.
--- On failure the review is re-inserted into 'dcReviewMap' so it can be
--- retried, and the exception is logged.
-withReregistration :: DiscordConfig -> Text -> PendingReview -> String -> IO () -> IO ()
-withReregistration cfg key pr label action = do
-  result <- try action :: IO (Either SomeException ())
-  case result of
-    Left ex -> do
-      atomically $ modifyTVar' (dcReviewMap cfg) (Map.insert key pr)
-      putStrLn $ "[Discord] " <> label <> " failed (review re-registered): " <> displayException ex
-    Right () -> pure ()
-
--- | Read the current body and tags from a 'PendingReview' and fire the
--- approve callback.  Records the trigger text (emoji or message) as a user
--- comment first.
-fireApproval :: PendingReview -> Text -> IO ()
-fireApproval pr trigger = do
-  prOnUserMessage pr trigger
-  bodyEn <- readTVarIO (prCurrentBodyEn pr)
-  bodyPtBr <- readTVarIO (prCurrentBodyPtBr pr)
-  tags <- readTVarIO (prCurrentTags pr)
-  prApprove pr bodyEn bodyPtBr tags
-
--- | Record the trigger text as a user comment and fire the reject callback.
-fireRejection :: PendingReview -> Text -> IO ()
-fireRejection pr trigger = do
-  prOnUserMessage pr trigger
-  prReject pr trigger
 
 -- | Fire a Discord REST call via a raw handle, discarding the result.
 restCallIO :: (FromJSON a) => DiscordHandle -> ChannelRequest a -> IO ()
@@ -582,3 +474,28 @@ postAsFile hdl tid caption filename body = do
   case result of
     Left err -> putStrLn $ "[Discord] Failed to post file attachment: " <> show err
     Right _ -> putStrLn $ "[Discord] Posted " <> T.unpack filename <> "."
+
+-- | Format a 'ReviewRequest' as a context summary for the review thread.
+-- Shows the source content info, tags, and subjects.
+buildContextMessage :: ReviewRequest -> Text
+buildContextMessage ReviewRequest {..} =
+  T.unlines $
+    [ "**Source:** " <> rrSourceTitle,
+      "> " <> rrSourceSummary,
+      "> <" <> rrSourceUrl <> ">"
+    ]
+      ++ ["**Tags:** " <> T.intercalate ", " (map (\t -> "`" <> t <> "`") rrTags) | not (null rrTags)]
+      ++ ["**Subjects:** " <> T.intercalate ", " rrSubjects | not (null rrSubjects)]
+
+-- | Post a plain-text message to a Discord thread from any IO context.
+-- Blocks until the bot is connected (i.e. 'dcHandle' is filled).
+-- Exceptions are logged but never re-thrown.
+sendThreadMessage :: DiscordConfig -> Text -> Text -> IO ()
+sendThreadMessage cfg threadId msg = do
+  hdl <- readMVar (dcHandle cfg)
+  tryLog "[Discord] WARNING: failed to send thread message" $
+    restCallIO hdl (CreateMessage (parseThreadId threadId) msg)
+
+-- | Parse a Discord thread ID (as 'Text') into a 'ChannelId'.
+parseThreadId :: Text -> ChannelId
+parseThreadId = mkChannelId . read . T.unpack

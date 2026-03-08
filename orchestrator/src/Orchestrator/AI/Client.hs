@@ -5,6 +5,7 @@ module Orchestrator.AI.Client
     DiscoveredContent (..),
     ModelItem (..),
     GeneratedDraft (..),
+    ReviseRequest (..),
     discoverContent,
     generateDraft,
     reviseDraft,
@@ -539,19 +540,29 @@ generateDraft cfg sources = do
           "generationConfig" .= defaultGenerationConfig
         ]
 
+-- | Input to 'reviseDraft'.
+data ReviseRequest = ReviseRequest
+  { -- | Current English Markdown body.
+    rvBodyEn :: !Text,
+    -- | Current Brazilian Portuguese Markdown body.
+    rvBodyPtBr :: !Text,
+    -- | Reviewer feedback to pass to the model.
+    rvFeedback :: !Text
+  }
+
 -- | Ask Gemini to revise an existing bilingual draft based on reviewer feedback.
 --
 -- The returned 'GeneratedDraft' has the same 'gdBranch' derived from the
 -- (possibly updated) title in the revised English content.
-reviseDraft :: AiConfig -> Text -> Text -> Text -> IO GeneratedDraft
-reviseDraft cfg currentBodyEn currentBodyPtBr feedback = do
+reviseDraft :: AiConfig -> ReviseRequest -> IO GeneratedDraft
+reviseDraft cfg ReviseRequest {..} = do
   (mdText, tokensUsed) <- callGemini cfg requestBody'
   pure (assembleGeneratedDraft tokensUsed mdText)
   where
     prompt =
-      T.replace "{{DRAFT_EN}}" currentBodyEn $
-        T.replace "{{DRAFT_PTBR}}" currentBodyPtBr $
-          T.replace "{{FEEDBACK}}" feedback revisePromptTemplate
+      T.replace "{{DRAFT_EN}}" rvBodyEn $
+        T.replace "{{DRAFT_PTBR}}" rvBodyPtBr $
+          T.replace "{{FEEDBACK}}" rvFeedback revisePromptTemplate
     requestBody' =
       object
         [ "contents" .= [userContents prompt],

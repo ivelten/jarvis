@@ -7,19 +7,55 @@
 module Orchestrator.PipelineSpec (spec) where
 
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
-import Database.Persist.Sql (Entity (..), Filter, entityVal, insert, selectList)
+import Database.Persist.Sql (Entity (..), Filter, entityVal, insert, selectList, toSqlKey)
 import Orchestrator.AI.Client (GeneratedDraft (..))
 import Orchestrator.Database.Connection (runDb)
 import Orchestrator.Database.Entities
 import Orchestrator.Database.Models
-import Orchestrator.Pipeline (persistDraftAnalysis)
+import Orchestrator.Pipeline (PublishDraftRequest (..), RenderedDraft (..), persistDraftAnalysis, renderDraftFiles)
 import Test.Hspec
 import TestHelpers
 
 spec :: Spec
 spec = do
   pool <- runIO setupTestPool
+
+  describe "renderDraftFiles" $ do
+    let req =
+          PublishDraftRequest
+            { pubRcKey = toSqlKey 1,
+              pubDraftKey = toSqlKey 1,
+              pubCreatedAt = epoch,
+              pubBodyEn = "# My Post Title\n\nEnglish body.",
+              pubBodyPtBr = "# Meu Título\n\nCorpo em português.",
+              pubTags = ["haskell", "fp"],
+              pubThreadId = Nothing
+            }
+        rendered = renderDraftFiles req
+
+    it "extracts the title from the EN H1" $
+      rdTitle rendered `shouldBe` "My Post Title"
+
+    it "derives the slug from the title" $
+      rdSlug rendered `shouldBe` "my-post-title"
+
+    it "builds the EN filename from the slug" $
+      rdFilenameEn rendered `shouldBe` "my-post-title.en.md"
+
+    it "builds the PT-BR filename from the slug" $
+      rdFilenamePtBr rendered `shouldBe` "my-post-title.pt-br.md"
+
+    it "includes the EN body in the EN content" $
+      rdContentEn rendered `shouldSatisfy` T.isInfixOf "English body."
+
+    it "includes the PT-BR body in the PT-BR content" $
+      rdContentPtBr rendered `shouldSatisfy` T.isInfixOf "Corpo em português."
+
+    it "EN and PT-BR files share the same slug" $
+      T.takeWhile (/= '.') (rdFilenameEn rendered)
+        `shouldBe` T.takeWhile (/= '.') (rdFilenamePtBr rendered)
 
   before_ (truncateTestTables pool) $ do
     describe "persistDraftAnalysis" $ do

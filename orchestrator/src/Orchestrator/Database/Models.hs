@@ -77,6 +77,8 @@ data DraftStatus
     DraftPublished
   | -- | Draft rejected by the human reviewer.
     DraftRejected
+  | -- | GitHub commit failed; the retry worker will attempt to publish again.
+    DraftPublishFailed
   deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 instance PersistField DraftStatus where
@@ -84,6 +86,7 @@ instance PersistField DraftStatus where
   toPersistValue DraftApproved = PersistText "approved"
   toPersistValue DraftPublished = PersistText "published"
   toPersistValue DraftRejected = PersistText "rejected"
+  toPersistValue DraftPublishFailed = PersistText "publish_failed"
   fromPersistValue pv = case pv of
     PersistText t -> parseDraftStatus t
     PersistLiteral bs -> parseDraftStatus (decodeUtf8 bs)
@@ -94,6 +97,7 @@ parseDraftStatus "reviewing" = Right DraftReviewing
 parseDraftStatus "approved" = Right DraftApproved
 parseDraftStatus "published" = Right DraftPublished
 parseDraftStatus "rejected" = Right DraftRejected
+parseDraftStatus "publish_failed" = Right DraftPublishFailed
 parseDraftStatus t = Left $ "Unknown DraftStatus value: " <> t
 
 instance PersistFieldSql DraftStatus where
