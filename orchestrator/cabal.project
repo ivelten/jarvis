@@ -1,3 +1,10 @@
 packages: .
 
 test-show-details: streaming
+
+-- crypton-1.1.0 migrated ByteArray from `memory` to the new `ram` package.
+-- http-client-tls-0.3.6.4 still uses `memory`, so Digest MD5 ends up with a
+-- `ram` ByteArrayAccess instance that is incompatible with the `memory`
+-- ByteArrayAccess expected by convertToBase.  Pin crypton to the last release
+-- that still uses `memory` until http-client-tls is updated.
+constraints: crypton < 1.1.0
