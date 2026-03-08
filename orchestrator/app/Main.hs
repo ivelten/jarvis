@@ -14,7 +14,7 @@ import Orchestrator.AI.Client (AiConfig (..))
 import Orchestrator.Database.Connection (createPool, migrateDatabase)
 import Orchestrator.Discord.Bot (DiscordBotSettings (..), mkDiscordConfig, startBot)
 import Orchestrator.GitHub.Client (GitHubConfig (..), defaultApiBase)
-import Orchestrator.Pipeline (PipelineEnv (..), handleApproveReview, handleRejectReview, handleReviseRequest, retryFailedDrafts, runDiscovery, runDraftGeneration)
+import Orchestrator.Pipeline (PipelineEnv (..), createSubject, handleApproveReview, handleRejectReview, handleReviseRequest, retryFailedDrafts, runDiscovery, runDraftGeneration)
 import System.Envy (FromEnv (..), decodeEnv, env, envMaybe)
 import System.Exit (exitFailure)
 import System.IO (BufferMode (..), hSetBuffering, stdout)
@@ -165,6 +165,7 @@ main = do
               dbsInteractionChannelId = fromIntegral (cfgDcInteractionChannelId cfg),
               dbsOnDiscoverCommand = runDiscovery pipeEnv,
               dbsOnDraftCommand = runDraftGeneration pipeEnv,
+              dbsOnSubjectCommand = createSubject pipeEnv,
               dbsOnApproveReview = handleApproveReview pipeEnv,
               dbsOnRejectReview = handleRejectReview pipeEnv,
               dbsOnReviseRequest = handleReviseRequest pipeEnv

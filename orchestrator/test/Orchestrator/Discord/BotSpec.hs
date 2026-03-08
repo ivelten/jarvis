@@ -28,6 +28,7 @@ testSettings =
       dbsInteractionChannelId = 3,
       dbsOnDiscoverCommand = pure (),
       dbsOnDraftCommand = pure (),
+      dbsOnSubjectCommand = \_ -> pure (),
       dbsOnApproveReview = \_ -> pure (),
       dbsOnRejectReview = \_ -> pure (),
       dbsOnReviseRequest = \_ -> pure ReviewNotActive

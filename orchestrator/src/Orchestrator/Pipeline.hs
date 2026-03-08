@@ -21,6 +21,7 @@ module Orchestrator.Pipeline
     RenderedDraft (..),
     PublishDraftRequest (..),
     DraftingStats (..),
+    createSubject,
   )
 where
 
@@ -30,7 +31,7 @@ import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, getCurrentTime)
-import Database.Persist (Entity (..), entityKey, entityVal, get, insert, insert_, selectFirst, selectList, update, (=.), (==.))
+import Database.Persist (Entity (..), entityKey, entityVal, get, insert, insertUnique, insert_, selectFirst, selectList, update, (=.), (==.))
 import Database.Persist.Sql (SqlPersistT)
 import Orchestrator.AI.Client
   ( AiConfig,
@@ -47,8 +48,9 @@ import Orchestrator.Database.Models
     ContentStatus (..),
     DraftStatus (..),
     TagList (..),
+    mkInterestScore,
   )
-import Orchestrator.Discord.Bot (ApproveReviewEvent (..), DiscordConfig, RejectReviewEvent (..), ReviewRequest (..), ReviseReviewEvent (..), RevisionResult (..), registerForReview, sendInteractionMessage, sendThreadMessage)
+import Orchestrator.Discord.Bot (ApproveReviewEvent (..), DiscordConfig, RejectReviewEvent (..), ReviewRequest (..), ReviseReviewEvent (..), RevisionResult (..), SubjectCommandEvent (..), registerForReview, sendInteractionMessage, sendThreadMessage)
 import Orchestrator.GitHub.Client (GitHubConfig, commitPost, triggerDeploy)
 import Orchestrator.Posts.Generator (HugoPostMeta (..), renderHugoPost)
 import Orchestrator.TextUtils (emojiApprove, emojiQueue, emojiReject, emojiSearch, emojiWarning, splitTitle, toSlug, truncateText)
@@ -548,3 +550,26 @@ rcToDiscovered rc =
       dcSummary = rawContentSummary rc,
       dcSubjects = []
     }
+
+-- | Create a new 'Subject' with interest score 3.
+-- Posts a confirmation or duplicate-warning message to the interaction channel.
+createSubject :: PipelineEnv -> SubjectCommandEvent -> IO ()
+createSubject PipelineEnv {..} SubjectCommandEvent {..} = do
+  now <- getCurrentTime
+  let score = either (error . T.unpack) id (mkInterestScore 3)
+  mKey <-
+    runDb pipeDbPool $
+      insertUnique
+        Subject
+          { subjectName = sceSubjectName,
+            subjectInterestScore = score,
+            subjectCreatedAt = now,
+            subjectUpdatedAt = now
+          }
+  case mKey of
+    Nothing ->
+      sendInteractionMessage pipeDcCfg $
+        emojiWarning <> " Subject \"" <> sceSubjectName <> "\" already exists."
+    Just _ ->
+      sendInteractionMessage pipeDcCfg $
+        emojiApprove <> " Subject \"" <> sceSubjectName <> "\" added with interest score 3."

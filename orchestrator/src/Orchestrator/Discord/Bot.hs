@@ -8,6 +8,7 @@ module Orchestrator.Discord.Bot
     ApproveReviewEvent (..),
     RejectReviewEvent (..),
     ReviseReviewEvent (..),
+    SubjectCommandEvent (..),
     mkDiscordConfig,
     registerForReview,
     sendInteractionMessage,
@@ -24,6 +25,7 @@ import Control.Exception (SomeException, displayException, try)
 import Control.Monad (forever, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ask, runReaderT)
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
@@ -70,6 +72,12 @@ data ReviewRequest = ReviewRequest
     rrOnThreadCreated :: Text -> IO ()
   }
 
+-- | Payload for the @\/subject@ slash command callback.
+newtype SubjectCommandEvent = SubjectCommandEvent
+  { -- | The subject name provided by the user.
+    sceSubjectName :: Text
+  }
+
 -- | Payload for the approve-review callback.
 data ApproveReviewEvent = ApproveReviewEvent
   { -- | Discord thread ID where the reaction or message arrived.
@@ -113,6 +121,8 @@ data DiscordConfig = DiscordConfig
     dcOnDiscoverCommand :: IO (),
     -- | IO action invoked when the @\/draft@ slash command is used.
     dcOnDraftCommand :: IO (),
+    -- | IO action invoked when the @\/subject@ slash command is used.
+    dcOnSubjectCommand :: !(SubjectCommandEvent -> IO ()),
     -- | Called when an approve reaction or approval message arrives.
     dcOnApproveReview :: !(ApproveReviewEvent -> IO ()),
     -- | Called when a reject reaction arrives.
@@ -142,6 +152,8 @@ data DiscordBotSettings = DiscordBotSettings
     dbsOnDiscoverCommand :: IO (),
     -- | IO action invoked when the @\/draft@ slash command is used.
     dbsOnDraftCommand :: IO (),
+    -- | IO action invoked when the @\/subject@ slash command is used.
+    dbsOnSubjectCommand :: !(SubjectCommandEvent -> IO ()),
     -- | Called when a draft is approved (reaction or approval phrase).
     dbsOnApproveReview :: ApproveReviewEvent -> IO (),
     -- | Called when a draft is rejected (reaction).
@@ -165,6 +177,7 @@ mkDiscordConfig DiscordBotSettings {..} = do
         dcHandle = handleVar,
         dcOnDiscoverCommand = dbsOnDiscoverCommand,
         dcOnDraftCommand = dbsOnDraftCommand,
+        dcOnSubjectCommand = dbsOnSubjectCommand,
         dcOnApproveReview = dbsOnApproveReview,
         dcOnRejectReview = dbsOnRejectReview,
         dcOnReviseRequest = dbsOnReviseRequest
@@ -368,6 +381,7 @@ registerSlashCommands appId cfg = do
           ("draft", "Manually trigger post draft generation")
         ]
   mapM_ (registerOne gid) cmds
+  registerSubjectCommand gid
   liftIO $ putStrLn "[Discord] Slash commands registered."
   where
     registerOne gid (name, desc) =
@@ -376,6 +390,30 @@ registerSlashCommands appId cfg = do
           liftIO $ putStrLn $ "[Discord] WARNING: could not build slash command: " <> T.unpack name
         Just cmd ->
           void $ restCall (CreateGuildApplicationCommand appId gid cmd)
+    registerSubjectCommand gid =
+      case createChatInput "subject" "Add a new subject of interest for the blog" of
+        Nothing ->
+          liftIO $ putStrLn "[Discord] WARNING: could not build subject slash command"
+        Just cmd -> do
+          let cmdWithOptions =
+                cmd
+                  { createOptions =
+                      Just
+                        ( OptionsValues
+                            [ OptionValueString
+                                { optionValueName = "name",
+                                  optionValueLocalizedName = Nothing,
+                                  optionValueDescription = "The subject name to add (e.g. \"Haskell Concurrency\")",
+                                  optionValueLocalizedDescription = Nothing,
+                                  optionValueRequired = True,
+                                  optionValueStringChoices = Left False,
+                                  optionValueStringMinLen = Nothing,
+                                  optionValueStringMaxLen = Nothing
+                                }
+                            ]
+                        )
+                  }
+          void $ restCall (CreateGuildApplicationCommand appId gid cmdWithOptions)
 
 -- | Route an incoming 'Interaction' to the appropriate slash-command handler.
 -- Commands are only processed when they originate from the configured
@@ -406,6 +444,15 @@ dispatchSlashCommand cfg intr cmdName = do
             "[Drafts]",
             dcOnDraftCommand cfg
           )
+        "subject" ->
+          case extractStringOption "name" intr of
+            Nothing ->
+              ("Please provide a subject name.", "[Subject]", pure ())
+            Just subjectName ->
+              ( "Adding subject \"" <> subjectName <> "\"...",
+                "[Subject]",
+                dcOnSubjectCommand cfg SubjectCommandEvent {sceSubjectName = subjectName}
+              )
         _ ->
           ("Unknown command.", "[Discord]", pure ())
   void $
@@ -415,6 +462,12 @@ dispatchSlashCommand cfg intr cmdName = do
         (interactionToken intr)
         (interactionResponseBasic reply)
   liftIO $ void $ forkIO $ tryLog (logPrefix <> " slash command error") action
+
+-- | Extract a named string option value from an interaction's option data.
+extractStringOption :: Text -> Interaction -> Maybe Text
+extractStringOption optName InteractionApplicationCommand {applicationCommandData = ApplicationCommandDataChatInput {optionsData = Just (OptionsDataValues opts)}} =
+  listToMaybe [s | OptionDataValueString {optionDataValueName = n, optionDataValueString = Right s} <- opts, n == optName]
+extractStringOption _ _ = Nothing
 
 -- | Post a plain-text notice to the interaction channel from any IO context.
 -- Blocks until the bot is connected (i.e. 'dcHandle' is filled).
