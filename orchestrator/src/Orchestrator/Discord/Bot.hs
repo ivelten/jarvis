@@ -121,6 +121,9 @@ data DiscordConfig = DiscordConfig
     dcChannelId :: !Word,
     -- | Text channel ID used for slash commands and bot notices.
     dcInteractionChannelId :: !Word,
+    -- | Discord user ID of the bot owner. Only interactions from this user
+    -- are acted upon; all others are silently ignored.
+    dcOwnerId :: !UserId,
     -- | Internal queue: pipeline puts review requests here.
     dcSendQueue :: !(MVar ReviewRequest),
     -- | Live 'DiscordHandle', filled once the bot connects.  Used by
@@ -161,6 +164,8 @@ data DiscordBotSettings = DiscordBotSettings
     dbsChannelId :: !Word,
     -- | Text channel ID used for slash commands and bot notices.
     dbsInteractionChannelId :: !Word,
+    -- | Discord user ID of the bot owner.
+    dbsOwnerId :: !Word,
     -- | IO action invoked when the @\/discover@ slash command is used.
     dbsOnDiscoverCommand :: IO (),
     -- | IO action invoked when the @\/draft@ slash command is used.
@@ -190,6 +195,7 @@ mkDiscordConfig DiscordBotSettings {..} = do
         dcGuildId = dbsGuildId,
         dcChannelId = dbsChannelId,
         dcInteractionChannelId = dbsInteractionChannelId,
+        dcOwnerId = mkUserId dbsOwnerId,
         dcSendQueue = sendQueue,
         dcHandle = handleVar,
         dcOnDiscoverCommand = dbsOnDiscoverCommand,
@@ -336,13 +342,13 @@ eventHandler :: DiscordConfig -> Event -> DiscordHandler ()
 eventHandler cfg (MessageReactionAdd ri) = do
   cache <- readCache
   let botId = userId (cacheCurrentUser cache)
-  when (reactionUserId ri /= botId) $
+  when (reactionUserId ri /= botId && reactionUserId ri == dcOwnerId cfg) $
     liftIO $
       handleReactionEvent cfg ri
 eventHandler cfg (MessageCreate m) = do
   cache <- readCache
   let botId = userId (cacheCurrentUser cache)
-  when (not (userIsBot (messageAuthor m)) && userId (messageAuthor m) /= botId) $ do
+  when (not (userIsBot (messageAuthor m)) && userId (messageAuthor m) == dcOwnerId cfg && userId (messageAuthor m) /= botId) $ do
     hdl <- ask
     liftIO $ handleMessageEvent cfg hdl m
 eventHandler cfg (Ready _ _ _ _ _ _ (PartialApplication appId _)) =
@@ -495,9 +501,11 @@ handleInteraction cfg intr =
   case intr of
     InteractionApplicationCommand
       { applicationCommandData = ApplicationCommandDataChatInput {applicationCommandDataName = cmdName},
-        interactionChannelId = mChanId
+        interactionChannelId = mChanId,
+        interactionUser = user
       }
-        | mChanId == Just (mkChannelId (dcInteractionChannelId cfg)) ->
+        | mChanId == Just (mkChannelId (dcInteractionChannelId cfg)),
+          interactionUserId user == Just (dcOwnerId cfg) ->
             dispatchSlashCommand cfg intr cmdName
     _ -> pure ()
 
@@ -593,6 +601,16 @@ mkChannelId w = DiscordId (Snowflake (fromIntegral w))
 -- | Convert a raw Word ID to a Discord 'GuildId'.
 mkGuildId :: Word -> GuildId
 mkGuildId w = DiscordId (Snowflake (fromIntegral w))
+
+-- | Convert a raw Word ID to a Discord 'UserId'.
+mkUserId :: Word -> UserId
+mkUserId w = DiscordId (Snowflake (fromIntegral w))
+
+-- | Extract the 'UserId' of the user who triggered an 'Interaction'.
+-- Returns 'Nothing' if the guild member has no associated user object.
+interactionUserId :: MemberOrUser -> Maybe UserId
+interactionUserId (MemberOrUser (Left member)) = userId <$> memberUser member
+interactionUserId (MemberOrUser (Right user)) = Just (userId user)
 
 -- | Render any Discord snowflake-based ID to text for use as a map key.
 showId :: DiscordId a -> Text

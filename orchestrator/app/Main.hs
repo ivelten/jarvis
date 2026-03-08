@@ -52,6 +52,8 @@ data Config = Config
     cfgDcChannelId :: !Int,
     -- | Discord text channel ID used for slash commands and bot notices.
     cfgDcInteractionChannelId :: !Int,
+    -- | Discord user ID of the bot owner (only this user's interactions are processed).
+    cfgDcOwnerId :: !Word,
     -- | How often to run the discovery step, in seconds (default: 86400 = 1 day).
     cfgDiscoveryIntervalSecs :: !Int,
     -- | How often to run the draft-generation step, in seconds (default: 43200 = 12 hours).
@@ -76,6 +78,7 @@ instance FromEnv Config where
       <*> env "DISCORD_GUILD_ID"
       <*> env "DISCORD_CHANNEL_ID"
       <*> env "DISCORD_INTERACTION_CHANNEL_ID"
+      <*> env "DISCORD_OWNER_ID"
       <*> (fromMaybe 86400 <$> envMaybe "DISCOVERY_INTERVAL_SECS")
       <*> (fromMaybe 43200 <$> envMaybe "DRAFT_INTERVAL_SECS")
       <*> (fromMaybe 3600 <$> envMaybe "RETRY_INTERVAL_SECS")
@@ -163,6 +166,7 @@ main = do
               dbsGuildId = fromIntegral (cfgDcGuildId cfg),
               dbsChannelId = fromIntegral (cfgDcChannelId cfg),
               dbsInteractionChannelId = fromIntegral (cfgDcInteractionChannelId cfg),
+              dbsOwnerId = cfgDcOwnerId cfg,
               dbsOnDiscoverCommand = runDiscovery pipeEnv,
               dbsOnDraftCommand = runDraftGeneration pipeEnv,
               dbsOnSubjectCommand = createSubject pipeEnv,

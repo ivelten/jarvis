@@ -162,6 +162,7 @@ testPipelineEnv pool = do
           dbsGuildId = 0,
           dbsChannelId = 0,
           dbsInteractionChannelId = 0,
+          dbsOwnerId = 0,
           dbsOnDiscoverCommand = pure (),
           dbsOnDraftCommand = pure (),
           dbsOnSubjectCommand = \_ -> pure (),

@@ -100,6 +100,9 @@ Enable **Developer Mode** in Discord: **Settings → Advanced → Developer Mode
 - Right-click that forum channel → **Copy Channel ID** → `DISCORD_CHANNEL_ID`
 - Create a regular **Text** channel where you will type slash commands and receive bot notices.
 - Right-click that text channel → **Copy Channel ID** → `DISCORD_INTERACTION_CHANNEL_ID`
+- Right-click **your own username** → **Copy User ID** → `DISCORD_OWNER_ID`
+
+> **Security note:** the bot only acts on interactions (slash commands, reactions, and thread messages) that originate from `DISCORD_OWNER_ID`. All others are silently ignored.
 
 ### 3. Get a Gemini API key
 
@@ -131,6 +134,7 @@ DISCORD_BOT_TOKEN=your-token-here
 DISCORD_GUILD_ID=123456789012345678
 DISCORD_CHANNEL_ID=123456789012345678
 DISCORD_INTERACTION_CHANNEL_ID=123456789012345678
+DISCORD_OWNER_ID=123456789012345678
 ```
 
 The `DATABASE_URL` default (`postgresql://postgres:postgres@db:5432/jarvis`) already points to the devcontainer PostgreSQL service — no changes needed there.
@@ -160,8 +164,11 @@ Once the bot is running, two slash commands are registered in your guild and ava
 | --- | --- |
 | `/discover` | Immediately runs a content discovery cycle (Gemini → database). |
 | `/draft` | Immediately runs a draft-generation cycle (database → Gemini → Discord thread). |
+| `/subject <name>` | Adds a new subject of interest with a default interest score of 3. |
+| `/disable-subject <id>` | Disables a subject by its numeric ID so it is excluded from discovery and drafting. |
+| `/list-subjects` | Posts a numbered list of all currently enabled subjects as a `.md` file. |
 
-The bot replies with a confirmation message right away, then runs the pipeline in the background. Commands typed in any other channel are silently ignored.
+All commands are restricted to the owner (`DISCORD_OWNER_ID`) and only work in the interaction channel (`DISCORD_INTERACTION_CHANNEL_ID`). Commands from any other user or channel are silently ignored.
 
 ## Configuration reference
 
@@ -181,7 +188,8 @@ All configuration is read from environment variables. See `.env.example` for the
 | `DISCORD_BOT_TOKEN` | ✅ | — | Bot token (without `Bot` prefix) |
 | `DISCORD_GUILD_ID` | ✅ | — | Server (guild) ID |
 | `DISCORD_CHANNEL_ID` | ✅ | — | Forum channel ID for review threads |
-| `DISCORD_INTERACTION_CHANNEL_ID` | ✅ | — | Text channel ID for slash commands and bot notices (`/discover`, `/draft`) |
+| `DISCORD_INTERACTION_CHANNEL_ID` | ✅ | — | Text channel ID for slash commands and bot notices (`/discover`, `/draft`, etc.) |
+| `DISCORD_OWNER_ID` | ✅ | — | Your Discord user ID — only interactions from this user are acted upon; all others are silently ignored |
 | `DISCOVERY_INTERVAL_SECS` | | `86400` | Seconds to sleep between discovery runs (first run also delayed) |
 | `DRAFT_INTERVAL_SECS` | | `43200` | Seconds to sleep between draft-generation runs (first run also delayed) |
 | `RETRY_INTERVAL_SECS` | | `3600` | Seconds to sleep between publish-retry runs. The retry worker re-attempts any draft in the `publish_failed` state without generating a new draft or losing the approved content. |

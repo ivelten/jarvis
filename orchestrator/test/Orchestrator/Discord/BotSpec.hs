@@ -26,6 +26,7 @@ testSettings =
       dbsGuildId = 1,
       dbsChannelId = 2,
       dbsInteractionChannelId = 3,
+      dbsOwnerId = 0,
       dbsOnDiscoverCommand = pure (),
       dbsOnDraftCommand = pure (),
       dbsOnSubjectCommand = \_ -> pure (),
