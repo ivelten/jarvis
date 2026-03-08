@@ -6,15 +6,19 @@
 -- revision step).
 module Orchestrator.PipelineSpec (spec) where
 
+import Control.Concurrent.MVar
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 import Database.Persist.Sql (Entity (..), Filter, entityVal, insert, selectList, toSqlKey)
-import Orchestrator.AI.Client (GeneratedDraft (..))
-import Orchestrator.Database.Connection (runDb)
+import Network.HTTP.Client (defaultManagerSettings, newManager)
+import Orchestrator.AI.Client (AiConfig (..), GeneratedDraft (..))
+import Orchestrator.Database.Connection (DbPool, runDb)
 import Orchestrator.Database.Entities
 import Orchestrator.Database.Models
-import Orchestrator.Pipeline (PublishDraftRequest (..), RenderedDraft (..), persistDraftAnalysis, renderDraftFiles)
+import Orchestrator.Discord.Bot (DiscordBotSettings (..), DiscordConfig (..), RevisionResult (..), SubjectCommandEvent (..), mkDiscordConfig)
+import Orchestrator.GitHub.Client (GitHubConfig (..))
+import Orchestrator.Pipeline (PipelineEnv (..), PublishDraftRequest (..), RenderedDraft (..), createSubject, persistDraftAnalysis, renderDraftFiles)
 import Test.Hspec
 import TestHelpers
 
@@ -80,12 +84,79 @@ spec = do
         rows <- runDb pool $ selectList ([] :: [Filter DraftAiAnalysis]) []
         length rows `shouldBe` 2
 
+    describe "createSubject" $ do
+      it "inserts a Subject row with interest score 3" $ do
+        env <- testPipelineEnv pool
+        createSubject env (SubjectCommandEvent "Haskell Concurrency")
+        rows <- runDb pool $ selectList ([] :: [Filter Subject]) []
+        length rows `shouldBe` 1
+        let row = entityVal (head rows)
+        subjectName row `shouldBe` "Haskell Concurrency"
+        unInterestScore (subjectInterestScore row) `shouldBe` 3
+
+      it "does not insert a duplicate when the name already exists" $ do
+        env <- testPipelineEnv pool
+        createSubject env (SubjectCommandEvent "Haskell")
+        createSubject env (SubjectCommandEvent "Haskell")
+        rows <- runDb pool $ selectList ([] :: [Filter Subject]) []
+        length rows `shouldBe` 1
+
+      it "inserts multiple subjects with distinct names" $ do
+        env <- testPipelineEnv pool
+        createSubject env (SubjectCommandEvent "Haskell")
+        createSubject env (SubjectCommandEvent "Nix")
+        rows <- runDb pool $ selectList ([] :: [Filter Subject]) []
+        length rows `shouldBe` 2
+
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
 
 epoch :: UTCTime
 epoch = UTCTime (fromGregorian 2026 1 1) (secondsToDiffTime 0)
+
+-- | Build a minimal 'PipelineEnv' backed by the test pool.
+-- The 'DiscordConfig' uses no-op callbacks and a dummy token; Discord API
+-- calls are never made from integration tests.
+testPipelineEnv :: DbPool -> IO PipelineEnv
+testPipelineEnv pool = do
+  mgr <- newManager defaultManagerSettings
+  dcCfg <- mkDiscordConfig dummyBotSettings
+  -- Pre-fill the handle MVar with an undefined value so that
+  -- sendInteractionMessage does not block waiting for a bot connection.
+  -- Any REST call will throw immediately, which tryLog catches and discards.
+  putMVar (dcHandle dcCfg) (error "testPipelineEnv: no live Discord connection")
+  pure
+    PipelineEnv
+      { pipeAiCfg = AiConfig {aiApiKey = "", aiModels = [], aiManager = mgr},
+        pipeGhCfg =
+          GitHubConfig
+            { ghToken = "",
+              ghRepoOwner = "",
+              ghRepoName = "",
+              ghBranch = "",
+              ghPostsPath = "",
+              ghWorkflowId = "",
+              ghManager = mgr,
+              ghApiBase = ""
+            },
+        pipeDcCfg = dcCfg,
+        pipeDbPool = pool
+      }
+  where
+    dummyBotSettings =
+      DiscordBotSettings
+        { dbsBotToken = "test-token",
+          dbsGuildId = 0,
+          dbsChannelId = 0,
+          dbsInteractionChannelId = 0,
+          dbsOnDiscoverCommand = pure (),
+          dbsOnDraftCommand = pure (),
+          dbsOnSubjectCommand = \_ -> pure (),
+          dbsOnApproveReview = \_ -> pure (),
+          dbsOnRejectReview = \_ -> pure (),
+          dbsOnReviseRequest = \_ -> pure ReviewNotActive
+        }
 
 sampleDraft :: Text -> PostDraft
 sampleDraft branch =
