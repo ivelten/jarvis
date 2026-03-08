@@ -96,7 +96,6 @@ ReviewComment
 -- | AI analysis produced for a PostDraft creation or revision iteration.
 DraftAiAnalysis
   postDraftId    PostDraftId
-  summary        Text
   tokensUsed     Int
   analyzedAt     UTCTime
   deriving Show Eq

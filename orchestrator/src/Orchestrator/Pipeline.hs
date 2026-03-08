@@ -20,6 +20,7 @@ module Orchestrator.Pipeline
     renderDraftFiles,
     RenderedDraft (..),
     PublishDraftRequest (..),
+    DraftingStats (..),
   )
 where
 
@@ -51,7 +52,18 @@ import Orchestrator.Discord.Bot (ApproveReviewEvent (..), DiscordConfig, RejectR
 import Orchestrator.GitHub.Client (GitHubConfig, commitPost, triggerDeploy)
 import Orchestrator.Posts.Generator (HugoPostMeta (..), renderHugoPost)
 import Orchestrator.TextUtils (emojiApprove, emojiQueue, emojiReject, emojiSearch, emojiWarning, splitTitle, toSlug, truncateText)
-import Orchestrator.Topics.Selector (ingestDiscoveredContent, pendingContent)
+import Orchestrator.Topics.Selector (DiscoveryStats (..), ingestDiscoveredContent, pendingContent)
+
+-- ---------------------------------------------------------------------------
+-- Stats
+-- ---------------------------------------------------------------------------
+
+-- | Statistics returned by a draft-generation run.
+newtype DraftingStats = DraftingStats
+  { -- | Tokens consumed by the AI draft-generation call.
+    drsTokensUsed :: Int
+  }
+  deriving (Show, Eq)
 
 -- ---------------------------------------------------------------------------
 -- Environment
@@ -71,13 +83,23 @@ data PipelineEnv = PipelineEnv
 -- ---------------------------------------------------------------------------
 
 -- | Ask Gemini to discover new content and persist it to the database.
--- On success, posts a notice to the interaction channel.
+-- On success, posts a notice to the interaction channel including discovery stats.
 runDiscovery :: PipelineEnv -> IO ()
 runDiscovery PipelineEnv {..} = do
   putStrLn "[Discovery] Discovering content via Gemini..."
-  runDb pipeDbPool (ingestDiscoveredContent pipeAiCfg)
+  DiscoveryStats {..} <- runDb pipeDbPool (ingestDiscoveredContent pipeAiCfg)
   putStrLn "[Discovery] Done."
-  sendInteractionMessage pipeDcCfg (emojiSearch <> " **Content discovery complete.** New topics have been added to the queue.")
+  sendInteractionMessage pipeDcCfg $
+    emojiSearch
+      <> " **Content discovery complete.**"
+      <> " Found "
+      <> T.pack (show dsItemsFound)
+      <> " item(s), "
+      <> T.pack (show dsItemsIngested)
+      <> " ingested"
+      <> " ("
+      <> T.pack (show dsTokensUsed)
+      <> " tokens used)."
 
 -- | Pick the next pending content item, generate a Markdown draft, and
 -- register it for Discord review.  The approve/reject/revision callbacks are
@@ -89,8 +111,14 @@ runDraftGeneration env@PipelineEnv {..} = do
   case pending of
     [] -> putStrLn "[Drafts] No pending content to process. Skipping."
     (item : _) -> do
-      processDraft env (entityKey item) (entityVal item)
-      sendInteractionMessage pipeDcCfg (emojiQueue <> " **Draft ready for review.** Check the forum channel for a new thread.")
+      DraftingStats {..} <- processDraft env (entityKey item) (entityVal item)
+      sendInteractionMessage pipeDcCfg $
+        emojiQueue
+          <> " **Draft ready for review.**"
+          <> " Check the forum channel for a new thread"
+          <> " ("
+          <> T.pack (show drsTokensUsed)
+          <> " tokens used)."
 
 -- ---------------------------------------------------------------------------
 -- Database-backed event handlers
@@ -199,7 +227,7 @@ handleReviseRequest env@PipelineEnv {..} ReviseReviewEvent {..} = do
 -- inside 'rrOnThreadCreated' after the Discord forum thread is successfully
 -- created (see 'atomicPersistDraft').  This ensures the database never holds a
 -- 'DraftReviewing' record without a 'discord_thread_id'.
-processDraft :: PipelineEnv -> Key RawContent -> RawContent -> IO ()
+processDraft :: PipelineEnv -> Key RawContent -> RawContent -> IO DraftingStats
 processDraft env@PipelineEnv {..} rcKey rc = do
   putStrLn $ "[Drafts] Generating draft for: " <> T.unpack (rawContentTitle rc)
   draft <- generateDraft pipeAiCfg [rcToDiscovered rc]
@@ -234,6 +262,7 @@ processDraft env@PipelineEnv {..} rcKey rc = do
           }
   registerForReview pipeDcCfg rr
   putStrLn "[Drafts] Draft queued for Discord review."
+  pure DraftingStats {drsTokensUsed = gdTokensUsed draft}
 
 -- | All data needed to atomically persist a new draft along with its Discord thread ID.
 data PersistDraftRequest = PersistDraftRequest
@@ -316,7 +345,6 @@ persistDraftAnalysis pdKey draft analyzedAt =
   insert_
     DraftAiAnalysis
       { draftAiAnalysisPostDraftId = pdKey,
-        draftAiAnalysisSummary = truncateText 500 (gdBodyEn draft),
         draftAiAnalysisTokensUsed = gdTokensUsed draft,
         draftAiAnalysisAnalyzedAt = analyzedAt
       }

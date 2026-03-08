@@ -4,6 +4,7 @@ module Orchestrator.Topics.Selector
     recordDiscovery,
     topSubjects,
     pendingContent,
+    DiscoveryStats (..),
   )
 where
 
@@ -26,11 +27,22 @@ import Orchestrator.AI.Client (AiConfig, DiscoveredContent (..), discoverContent
 import Orchestrator.Database.Entities
 import Orchestrator.Database.Models
 
+-- | Statistics returned by a content-discovery run.
+data DiscoveryStats = DiscoveryStats
+  { -- | Total items returned by the AI.
+    dsItemsFound :: !Int,
+    -- | Total items persisted (inserted or upserted).
+    dsItemsIngested :: !Int,
+    -- | Tokens consumed by the AI call.
+    dsTokensUsed :: !Int
+  }
+  deriving (Show, Eq)
+
 -- | Ask the AI to search the web and persist any newly discovered content.
 -- Subjects are read from the database at call time, sorted by interest score
 -- descending, capped at the top 10, so higher-priority subjects always get
 -- included in the discovery prompt.
-ingestDiscoveredContent :: AiConfig -> SqlPersistT IO ()
+ingestDiscoveredContent :: AiConfig -> SqlPersistT IO DiscoveryStats
 ingestDiscoveredContent aiCfg = do
   subjects <- topSubjects
   let names = map (subjectName . entityVal) subjects
@@ -45,17 +57,19 @@ topSubjects = selectList [] [Desc SubjectInterestScore, LimitTo 10]
 -- | Persist a list of discovered content items and record a 'ContentSearchAiAnalysis'
 -- telemetry row.  Separated from 'ingestDiscoveredContent' so it can be tested
 -- without a real AI call.
-recordDiscovery :: Int -> [DiscoveredContent] -> SqlPersistT IO ()
+recordDiscovery :: Int -> [DiscoveredContent] -> SqlPersistT IO DiscoveryStats
 recordDiscovery tokensUsed discovered = do
   ingestContent discovered
   now <- liftIO getCurrentTime
+  let found = length discovered
   insert_
     ContentSearchAiAnalysis
-      { contentSearchAiAnalysisTotalItemsFound = length discovered,
-        contentSearchAiAnalysisItemsIngested = length discovered,
+      { contentSearchAiAnalysisTotalItemsFound = found,
+        contentSearchAiAnalysisItemsIngested = found,
         contentSearchAiAnalysisTokensUsed = tokensUsed,
         contentSearchAiAnalysisSearchedAt = now
       }
+  pure DiscoveryStats {dsItemsFound = found, dsItemsIngested = found, dsTokensUsed = tokensUsed}
 
 -- | Persist a list of already-discovered content items (upsert by URL).
 -- Triage fields (@status@, @rejectionReason@) are never overwritten on
