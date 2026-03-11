@@ -4,6 +4,7 @@
 -- handled automatically by the top-level test 'Main'.
 module Orchestrator.Topics.SelectorSpec (spec) where
 
+import Data.Maybe (listToMaybe)
 import Data.Text (Text, pack, unpack)
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 import Database.Persist.Sql (Entity (..), Filter, entityKey, entityVal, insert_, selectList, update, (=.), (==.))
@@ -48,21 +49,21 @@ spec = do
           insert_ (rawContent "https://rejected.com" ContentRejected)
         result <- runDb pool pendingContent
         length result `shouldBe` 1
-        rawContentStatus (entityVal (head result)) `shouldBe` ContentNew
+        fmap (rawContentStatus . entityVal) (listToMaybe result) `shouldBe` Just ContentNew
 
     describe "ingestContent" $ do
       it "inserts new items as ContentNew" $ do
         runDb pool $ ingestContent [discovered "https://new.com" "Original title"]
         result <- runDb pool pendingContent
         length result `shouldBe` 1
-        rawContentTitle (entityVal (head result)) `shouldBe` "Original title"
+        fmap (rawContentTitle . entityVal) (listToMaybe result) `shouldBe` Just "Original title"
 
       it "upserts: updates title on a duplicate URL" $ do
         runDb pool $ ingestContent [discovered "https://dup.com" "Old title"]
         runDb pool $ ingestContent [discovered "https://dup.com" "New title"]
         result <- runDb pool pendingContent
         length result `shouldBe` 1
-        rawContentTitle (entityVal (head result)) `shouldBe` "New title"
+        fmap (rawContentTitle . entityVal) (listToMaybe result) `shouldBe` Just "New title"
 
       it "upserts: does not reset a non-New status back to New" $ do
         runDb pool $ ingestContent [discovered "https://triaged.com" "Title"]
@@ -89,7 +90,8 @@ spec = do
             ]
         result <- runDb pool pendingContent
         length result `shouldBe` 1
-        links <- runDb pool $ selectList [RawContentSubjectRawContentId ==. entityKey (head result)] []
+        let contentKey = maybe (error "expected a result row") entityKey (listToMaybe result)
+        links <- runDb pool $ selectList [RawContentSubjectRawContentId ==. contentKey] []
         links `shouldBe` ([] :: [Entity RawContentSubject])
 
       it "links content to an existing subject by name" $ do
@@ -114,7 +116,8 @@ spec = do
             ]
         result <- runDb pool pendingContent
         length result `shouldBe` 1
-        links <- runDb pool $ selectList [RawContentSubjectRawContentId ==. entityKey (head result)] []
+        let contentKey = maybe (error "expected a result row") entityKey (listToMaybe result)
+        links <- runDb pool $ selectList [RawContentSubjectRawContentId ==. contentKey] []
         length links `shouldBe` 1
 
       it "links content to multiple subjects when several names match" $ do
@@ -147,7 +150,8 @@ spec = do
             ]
         result <- runDb pool pendingContent
         length result `shouldBe` 1
-        links <- runDb pool $ selectList [RawContentSubjectRawContentId ==. entityKey (head result)] []
+        let contentKey = maybe (error "expected a result row") entityKey (listToMaybe result)
+        links <- runDb pool $ selectList [RawContentSubjectRawContentId ==. contentKey] []
         length links `shouldBe` 2
 
     describe "topSubjects" $ do
@@ -184,7 +188,7 @@ spec = do
         _ <- runDb pool $ recordDiscovery 42 items
         rows <- runDb pool $ selectList ([] :: [Filter ContentSearchAiAnalysis]) []
         length rows `shouldBe` 1
-        let row = entityVal (head rows)
+        let row = maybe (error "expected a row") entityVal (listToMaybe rows)
         contentSearchAiAnalysisTotalItemsFound row `shouldBe` 2
         contentSearchAiAnalysisItemsIngested row `shouldBe` 2
         contentSearchAiAnalysisTokensUsed row `shouldBe` 42
@@ -199,7 +203,7 @@ spec = do
         _ <- runDb pool $ recordDiscovery 5 []
         rows <- runDb pool $ selectList ([] :: [Filter ContentSearchAiAnalysis]) []
         length rows `shouldBe` 1
-        contentSearchAiAnalysisTotalItemsFound (entityVal (head rows)) `shouldBe` 0
+        fmap (contentSearchAiAnalysisTotalItemsFound . entityVal) (listToMaybe rows) `shouldBe` Just 0
 
 -- ---------------------------------------------------------------------------
 -- Helpers

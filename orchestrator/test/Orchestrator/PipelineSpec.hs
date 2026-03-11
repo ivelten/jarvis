@@ -7,6 +7,7 @@
 module Orchestrator.PipelineSpec (spec) where
 
 import Control.Concurrent.MVar
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
@@ -67,14 +68,14 @@ spec = do
         runDb pool $ persistDraftAnalysis pdKey sampleGenerated epoch
         rows <- runDb pool $ selectList ([] :: [Filter DraftAiAnalysis]) []
         length rows `shouldBe` 1
-        let row = entityVal (head rows)
+        let row = maybe (error "expected a row") entityVal (listToMaybe rows)
         draftAiAnalysisPostDraftId row `shouldBe` pdKey
 
       it "records the token count from the generated draft" $ do
         pdKey <- runDb pool $ insert (sampleDraft "draft/tokens-post")
         runDb pool $ persistDraftAnalysis pdKey sampleGenerated {gdTokensUsed = 42} epoch
         rows <- runDb pool $ selectList ([] :: [Filter DraftAiAnalysis]) []
-        draftAiAnalysisTokensUsed (entityVal (head rows)) `shouldBe` 42
+        fmap (draftAiAnalysisTokensUsed . entityVal) (listToMaybe rows) `shouldBe` Just 42
 
       it "inserts one row per call (initial + revision each produce a row)" $ do
         pdKey <- runDb pool $ insert (sampleDraft "draft/multi-analysis")
@@ -89,7 +90,7 @@ spec = do
         createSubject env (SubjectCommandEvent "Haskell Concurrency")
         rows <- runDb pool $ selectList ([] :: [Filter Subject]) []
         length rows `shouldBe` 1
-        let row = entityVal (head rows)
+        let row = maybe (error "expected a row") entityVal (listToMaybe rows)
         subjectName row `shouldBe` "Haskell Concurrency"
         unInterestScore (subjectInterestScore row) `shouldBe` 3
 
@@ -125,13 +126,13 @@ spec = do
         _ <- atomicPersistDraft env customReq
         rows <- runDb pool $ selectList ([] :: [Filter PostDraft]) []
         length rows `shouldBe` 1
-        postDraftStatus (entityVal (head rows)) `shouldBe` DraftReviewing
+        fmap (postDraftStatus . entityVal) (listToMaybe rows) `shouldBe` Just DraftReviewing
 
       it "stores the thread ID on the draft" $ do
         env <- testPipelineEnv pool
         _ <- atomicPersistDraft env customReq
         rows <- runDb pool $ selectList ([] :: [Filter PostDraft]) []
-        postDraftDiscordThreadId (entityVal (head rows)) `shouldBe` Just "thread-custom-1"
+        fmap (postDraftDiscordThreadId . entityVal) (listToMaybe rows) `shouldBe` Just (Just "thread-custom-1")
 
       it "inserts a DraftAiAnalysis telemetry row" $ do
         env <- testPipelineEnv pool

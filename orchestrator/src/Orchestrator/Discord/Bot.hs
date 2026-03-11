@@ -527,7 +527,7 @@ registerSubjectCommand appId gid =
   case createChatInput cmdSubject "Add a new subject of interest for the blog" of
     Nothing ->
       liftIO $ putStrLn "[Discord] WARNING: could not build subject slash command"
-    Just cmd -> do
+    Just cmd@CreateApplicationCommandChatInput {} -> do
       let cmdWithOptions =
             cmd
               { createOptions =
@@ -547,6 +547,8 @@ registerSubjectCommand appId gid =
                     )
               }
       void $ restCall (CreateGuildApplicationCommand appId gid cmdWithOptions)
+    Just _ ->
+      liftIO $ putStrLn "[Discord] WARNING: unexpected command type returned by createChatInput for subject command"
 
 -- | Register the @\/disable-subject@ slash command with a required integer @id@ option.
 registerDisableSubjectCommand :: ApplicationId -> GuildId -> DiscordHandler ()
@@ -554,7 +556,7 @@ registerDisableSubjectCommand appId gid =
   case createChatInput cmdDisableSubject "Disable a subject by ID" of
     Nothing ->
       liftIO $ putStrLn "[Discord] WARNING: could not build disable-subject slash command"
-    Just cmd -> do
+    Just cmd@CreateApplicationCommandChatInput {} -> do
       let cmdWithOptions =
             cmd
               { createOptions =
@@ -574,6 +576,8 @@ registerDisableSubjectCommand appId gid =
                     )
               }
       void $ restCall (CreateGuildApplicationCommand appId gid cmdWithOptions)
+    Just _ ->
+      liftIO $ putStrLn "[Discord] WARNING: unexpected command type returned by createChatInput for disable-subject command"
 
 -- | Route an incoming 'Interaction' to the appropriate slash-command handler.
 -- Commands are only processed when they originate from the configured
