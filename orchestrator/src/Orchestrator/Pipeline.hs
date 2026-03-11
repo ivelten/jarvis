@@ -55,11 +55,11 @@ import Orchestrator.Database.Models
     ContentStatus (..),
     DraftStatus (..),
     TagList (..),
-    mkInterestScore,
+    defaultInterestScore,
   )
 import Orchestrator.Discord.Bot (ApproveReviewEvent (..), CustomPostRequestEvent (..), DisableSubjectCommandEvent (..), DiscordConfig, RejectReviewEvent (..), ReviewRequest (..), ReviseReviewEvent (..), RevisionResult (..), SubjectCommandEvent (..), activateCustomReview, closeThread, registerForReview, sendInteractionFile, sendInteractionMessage, sendThreadMessage)
 import Orchestrator.GitHub.Client (GitHubConfig, commitPost, triggerDeploy)
-import Orchestrator.IOUtils (tryIO)
+import Orchestrator.IOUtils (logMsg, tryIO)
 import Orchestrator.Posts.Generator (HugoPostMeta (..), renderHugoPost)
 import Orchestrator.TextUtils (emojiApprove, emojiDraft, emojiQueue, emojiReject, emojiSearch, emojiStar, emojiWarning, splitTitle, toSlug, truncateText)
 import Orchestrator.Topics.Selector (DiscoveryStats (..), ingestDiscoveredContent, pendingContent)
@@ -96,9 +96,9 @@ data PipelineEnv = PipelineEnv
 -- On success, posts a notice to the interaction channel including discovery stats.
 runDiscovery :: PipelineEnv -> IO ()
 runDiscovery PipelineEnv {..} = do
-  putStrLn "[Discovery] Discovering content via Gemini..."
+  logMsg "[Discovery] Discovering content via Gemini..."
   DiscoveryStats {..} <- runDb pipeDbPool (ingestDiscoveredContent pipeAiCfg)
-  putStrLn "[Discovery] Done."
+  logMsg "[Discovery] Done."
   sendInteractionMessage pipeDcCfg $
     emojiSearch
       <> " **Content discovery complete.**"
@@ -119,7 +119,7 @@ runDraftGeneration :: PipelineEnv -> IO ()
 runDraftGeneration env@PipelineEnv {..} = do
   pending <- runDb pipeDbPool pendingContent
   case pending of
-    [] -> putStrLn "[Drafts] No pending content to process. Skipping."
+    [] -> logMsg "[Drafts] No pending content to process. Skipping."
     (item : _) -> do
       DraftingStats {..} <- processDraft env (entityKey item) (entityVal item)
       sendInteractionMessage pipeDcCfg $
@@ -145,7 +145,7 @@ handleApproveReview env@PipelineEnv {..} ApproveReviewEvent {..} = do
         [PostDraftDiscordThreadId ==. Just aprThreadId, PostDraftStatus ==. DraftReviewing]
         []
   case mDraft of
-    Nothing -> putStrLn $ "[Drafts] No active review for thread " <> T.unpack aprThreadId
+    Nothing -> logMsg $ "[Drafts] No active review for thread " <> aprThreadId
     Just (Entity pdKey pd) -> do
       let bodyEn = fromMaybe "" (postDraftContentMarkdownEn pd)
           bodyPtBr = fromMaybe "" (postDraftContentMarkdownPtBr pd)
@@ -176,7 +176,7 @@ handleRejectReview env@PipelineEnv {..} RejectReviewEvent {..} = do
         [PostDraftDiscordThreadId ==. Just rejThreadId, PostDraftStatus ==. DraftReviewing]
         []
   case mDraft of
-    Nothing -> putStrLn $ "[Drafts] No active review for thread " <> T.unpack rejThreadId
+    Nothing -> logMsg $ "[Drafts] No active review for thread " <> rejThreadId
     Just (Entity pdKey _pd) -> do
       insertComment env pdKey CommentAuthorUser rejReason
       sendThreadMessage pipeDcCfg rejThreadId $
@@ -203,7 +203,7 @@ handleReviseRequest env@PipelineEnv {..} ReviseReviewEvent {..} = do
         []
   case mDraft of
     Nothing -> do
-      putStrLn $ "[Drafts] Revision request for unknown thread: " <> T.unpack rvsThreadId
+      logMsg $ "[Drafts] Revision request for unknown thread: " <> rvsThreadId
       return ReviewNotActive
     Just (Entity pdKey pd) -> do
       let bodyEn = fromMaybe "" (postDraftContentMarkdownEn pd)
@@ -214,7 +214,7 @@ handleReviseRequest env@PipelineEnv {..} ReviseReviewEvent {..} = do
       case result of
         Left ex -> do
           let errMsg = T.pack (displayException ex)
-          putStrLn $ "[Drafts] Gemini error: " <> T.unpack errMsg
+          logMsg $ "[Drafts] Gemini error: " <> errMsg
           return (RevisionError errMsg)
         Right draft -> do
           recordRevision env pdKey draft
@@ -232,7 +232,7 @@ handleReviseRequest env@PipelineEnv {..} ReviseReviewEvent {..} = do
 -- 'DraftReviewing' record without a 'discord_thread_id'.
 processDraft :: PipelineEnv -> Key RawContent -> RawContent -> IO DraftingStats
 processDraft env@PipelineEnv {..} rcKey rc = do
-  putStrLn $ "[Drafts] Generating draft for: " <> T.unpack (rawContentTitle rc)
+  logMsg $ "[Drafts] Generating draft for: " <> rawContentTitle rc
   draft <- generateDraft pipeAiCfg [rcToDiscovered rc]
   now <- getCurrentTime
   subjects <- runDb pipeDbPool $ do
@@ -264,7 +264,7 @@ processDraft env@PipelineEnv {..} rcKey rc = do
               pure ()
           }
   registerForReview pipeDcCfg rr
-  putStrLn "[Drafts] Draft queued for Discord review."
+  logMsg "[Drafts] Draft queued for Discord review."
   pure DraftingStats {drsTokensUsed = gdTokensUsed draft}
 
 -- | All data needed to atomically persist a new draft along with its Discord thread ID.
@@ -385,11 +385,11 @@ data PublishDraftRequest = PublishDraftRequest
 publishDraft :: PipelineEnv -> PublishDraftRequest -> IO ()
 publishDraft env@PipelineEnv {..} req@PublishDraftRequest {..} = do
   let rendered = renderDraftFiles req
-  putStrLn $
+  logMsg $
     "[Drafts] Approved! Committing "
-      <> T.unpack (rdFilenameEn rendered)
+      <> rdFilenameEn rendered
       <> " and "
-      <> T.unpack (rdFilenamePtBr rendered)
+      <> rdFilenamePtBr rendered
       <> " to GitHub..."
   approvedAt <- getCurrentTime
   runDb pipeDbPool $
@@ -442,7 +442,7 @@ onCommitFailure PipelineEnv {..} draftKey ex = do
   failedAt <- getCurrentTime
   runDb pipeDbPool $
     update draftKey [PostDraftStatus =. DraftPublishFailed, PostDraftUpdatedAt =. failedAt]
-  putStrLn $ "[Drafts] Commit failed; marked as publish_failed. Error: " <> displayException ex
+  logMsg $ "[Drafts] Commit failed; marked as publish_failed. Error: " <> T.pack (displayException ex)
   ioError (userError (displayException ex))
 
 -- | Handle a successful commit: persist published state then trigger deploy.
@@ -462,20 +462,20 @@ onCommitSuccess PipelineEnv {..} PublishDraftRequest {..} RenderedDraft {..} = d
         PostDraftPublishedAt =. Just publishedAt',
         PostDraftUpdatedAt =. publishedAt'
       ]
-  putStrLn "[Drafts] Post committed to GitHub. Triggering deploy workflow..."
+  logMsg "[Drafts] Post committed to GitHub. Triggering deploy workflow..."
   deployResult <- tryIO (triggerDeploy pipeGhCfg)
   case deployResult of
     Left ex -> do
       -- The post is already committed; a deploy failure is non-fatal.
       -- The next push to the repo will trigger the deploy workflow anyway.
-      putStrLn $ "[Drafts] Warning: deploy dispatch failed (post is committed): " <> displayException ex
+      logMsg $ "[Drafts] Warning: deploy dispatch failed (post is committed): " <> T.pack (displayException ex)
       sendInteractionMessage pipeDcCfg $
         emojiWarning <> " **Deploy failed.** _" <> rdTitle <> "_ has been committed to GitHub, but the deploy workflow could not be triggered automatically."
       forM_ pubThreadId $ \tid ->
         sendThreadMessage pipeDcCfg tid $
           emojiWarning <> " **Deploy failed.** The workflow could not be triggered automatically \x2014 the post is committed and will deploy on the next push."
     Right () -> do
-      putStrLn "[Drafts] Deploy triggered."
+      logMsg "[Drafts] Deploy triggered."
       sendInteractionMessage pipeDcCfg $
         emojiApprove <> " **Post published!** _" <> rdTitle <> "_ has been committed to GitHub and the deploy workflow has been triggered."
 
@@ -489,16 +489,16 @@ retryFailedDrafts :: PipelineEnv -> IO ()
 retryFailedDrafts env@PipelineEnv {..} = do
   failed <- runDb pipeDbPool $ selectList [PostDraftStatus ==. DraftPublishFailed] []
   case failed of
-    [] -> putStrLn "[Retry] No failed drafts to retry."
+    [] -> logMsg "[Retry] No failed drafts to retry."
     drafts -> do
-      putStrLn $ "[Retry] Retrying " <> show (length drafts) <> " failed draft(s)..."
+      logMsg $ "[Retry] Retrying " <> T.pack (show (length drafts)) <> " failed draft(s)..."
       mapM_ retryOne drafts
   where
     retryOne (Entity pdKey pd) = do
       let bodyEn = fromMaybe "" (postDraftContentMarkdownEn pd)
           bodyPtBr = fromMaybe "" (postDraftContentMarkdownPtBr pd)
           tags = unTagList (postDraftSuggestedTags pd)
-      putStrLn $ "[Retry] Retrying publish for: '" <> T.unpack (postDraftTitle pd) <> "'"
+      logMsg $ "[Retry] Retrying publish for: '" <> postDraftTitle pd <> "'"
       result <-
         tryIO
           ( publishDraft
@@ -513,13 +513,13 @@ retryFailedDrafts env@PipelineEnv {..} = do
                 }
           )
       case result of
-        Left ex -> putStrLn $ "[Retry] Publish still failing for '" <> T.unpack (postDraftTitle pd) <> "': " <> displayException ex
-        Right () -> putStrLn $ "[Retry] Successfully published '" <> T.unpack (postDraftTitle pd) <> "'."
+        Left ex -> logMsg $ "[Retry] Publish still failing for '" <> postDraftTitle pd <> "': " <> T.pack (displayException ex)
+        Right () -> logMsg $ "[Retry] Successfully published '" <> postDraftTitle pd <> "'."
 
 -- | Mark the raw content and post draft as rejected.
 rejectDraft :: PipelineEnv -> Key RawContent -> Key PostDraft -> Text -> IO ()
 rejectDraft PipelineEnv {..} rcKey postDraftKey reason = do
-  putStrLn $ "[Drafts] Draft rejected. Reason: " <> T.unpack reason
+  logMsg $ "[Drafts] Draft rejected. Reason: " <> reason
   rejectedAt <- getCurrentTime
   runDb pipeDbPool $ do
     update
@@ -537,7 +537,7 @@ rejectDraft PipelineEnv {..} rcKey postDraftKey reason = do
 -- associated 'RawContent' to update).
 rejectDraftOnly :: PipelineEnv -> Key PostDraft -> Text -> IO ()
 rejectDraftOnly PipelineEnv {..} postDraftKey reason = do
-  putStrLn $ "[Drafts] Custom draft rejected. Reason: " <> T.unpack reason
+  logMsg $ "[Drafts] Custom draft rejected. Reason: " <> reason
   rejectedAt <- getCurrentTime
   runDb pipeDbPool $
     update
@@ -555,13 +555,13 @@ rejectDraftOnly PipelineEnv {..} postDraftKey reason = do
 -- handler logs and notifies the user without creating a second draft.
 handleCustomPostRequest :: PipelineEnv -> CustomPostRequestEvent -> IO ()
 handleCustomPostRequest env@PipelineEnv {..} evt@CustomPostRequestEvent {..} = do
-  putStrLn $ "[CustomPost] New thread created: " <> T.unpack cpThreadId
+  logMsg $ "[CustomPost] New thread created: " <> cpThreadId
   mExisting <-
     runDb pipeDbPool $
       selectFirst [PostDraftDiscordThreadId ==. Just cpThreadId] []
   case (mExisting :: Maybe (Entity PostDraft)) of
     Just _ -> do
-      putStrLn $ "[CustomPost] Thread " <> T.unpack cpThreadId <> " already has a draft; ignoring."
+      logMsg $ "[CustomPost] Thread " <> cpThreadId <> " already has a draft; ignoring."
       sendThreadMessage pipeDcCfg cpThreadId $
         emojiWarning <> " This thread already has a draft associated with it."
     Nothing -> do
@@ -571,7 +571,7 @@ handleCustomPostRequest env@PipelineEnv {..} evt@CustomPostRequestEvent {..} = d
 -- | Full lifecycle for a custom post request: generate → persist → activate review.
 customPostGenerate :: PipelineEnv -> CustomPostRequestEvent -> IO (Maybe GeneratedDraft)
 customPostGenerate PipelineEnv {..} CustomPostRequestEvent {..} = do
-  putStrLn $ "[CustomPost] Generating draft for: \"" <> T.unpack cpTitleHint <> "\""
+  logMsg $ "[CustomPost] Generating draft for: \"" <> cpTitleHint <> "\""
   sendThreadMessage pipeDcCfg cpThreadId $
     emojiQueue <> " **Generating post draft…** This may take a moment."
   result <-
@@ -579,7 +579,7 @@ customPostGenerate PipelineEnv {..} CustomPostRequestEvent {..} = do
   case result of
     Left ex -> do
       let errMsg = T.pack (displayException ex)
-      putStrLn $ "[CustomPost] Generation failed: " <> T.unpack errMsg
+      logMsg $ "[CustomPost] Generation failed: " <> errMsg
       sendThreadMessage pipeDcCfg cpThreadId $
         emojiWarning <> " **Draft generation failed:** " <> errMsg
       pure Nothing
@@ -603,7 +603,7 @@ customPostPersistAndActivate env@PipelineEnv {..} CustomPostRequestEvent {..} dr
   case persistResult of
     Left ex -> do
       let errMsg = T.pack (displayException ex)
-      putStrLn $ "[CustomPost] Failed to persist draft: " <> T.unpack errMsg
+      logMsg $ "[CustomPost] Failed to persist draft: " <> errMsg
       sendThreadMessage pipeDcCfg cpThreadId $
         emojiWarning <> " **Failed to save draft:** " <> errMsg
     Right _ -> do
@@ -627,7 +627,7 @@ customPostPersistAndActivate env@PipelineEnv {..} CustomPostRequestEvent {..} dr
           <> "_ ("
           <> T.pack (show (gdTokensUsed draft))
           <> " tokens used)."
-      putStrLn $ "[CustomPost] Draft ready in thread " <> T.unpack cpThreadId
+      logMsg $ "[CustomPost] Draft ready in thread " <> cpThreadId
 
 -- ---------------------------------------------------------------------------
 -- Utilities
@@ -676,7 +676,7 @@ listEnabledSubjects PipelineEnv {..} = do
 createSubject :: PipelineEnv -> SubjectCommandEvent -> IO ()
 createSubject PipelineEnv {..} SubjectCommandEvent {..} = do
   now <- getCurrentTime
-  let score = either (error . T.unpack) id (mkInterestScore 3)
+  let score = defaultInterestScore
   mKey <-
     runDb pipeDbPool $
       insertUnique

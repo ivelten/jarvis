@@ -41,7 +41,7 @@ import Discord
 import Discord.Interactions
 import Discord.Requests (ApplicationCommandRequest (..), ChannelRequest (..), InteractionResponseRequest (..), MessageDetailedOpts (..), ModifyChannelOpts (..), StartThreadForumMediaMessage (..), StartThreadForumMediaOpts (..), StartThreadOpts (..))
 import Discord.Types
-import Orchestrator.IOUtils (tryIO, tryLog)
+import Orchestrator.IOUtils (logMsg, tryIO, tryLog)
 import Orchestrator.TextUtils (emojiDraft, emojiRevise, emojiWarning)
 
 -- ---------------------------------------------------------------------------
@@ -295,9 +295,9 @@ startBot cfg = do
               },
           discordOnStart = botWorker cfg,
           discordOnEvent = eventHandler cfg,
-          discordOnLog = \t -> putStrLn $ "[Discord] " <> T.unpack t
+          discordOnLog = \t -> logMsg $ "[Discord] " <> t
         }
-  putStrLn $ "[Discord] bot stopped: " <> T.unpack err
+  logMsg $ "[Discord] bot stopped: " <> err
 
 -- ---------------------------------------------------------------------------
 -- Internal bot workers
@@ -318,10 +318,10 @@ botWorker cfg = do
 drainQueue :: DiscordHandle -> DiscordConfig -> IO ()
 drainQueue hdl cfg = forever $ do
   rr <- takeMVar (dcSendQueue cfg)
-  putStrLn $ "[Discord] Dequeued review request: " <> T.unpack (rrTitle rr)
+  logMsg $ "[Discord] Dequeued review request: " <> rrTitle rr
   result <- tryIO (processReview hdl cfg rr)
   case result of
-    Left ex -> putStrLn $ "[Discord] drainQueue exception: " <> displayException ex
+    Left ex -> logMsg $ "[Discord] drainQueue exception: " <> T.pack (displayException ex)
     Right () -> pure ()
 
 -- | Orchestrate the full review flow: create thread, persist, then activate.
@@ -332,11 +332,11 @@ processReview hdl cfg rr@ReviewRequest {..} = do
       key = showId tid
   -- Register in the skip set before the ThreadCreate event can be processed.
   modifyMVar_ (dcSkipThreads cfg) $ pure . Set.insert tid
-  putStrLn $ "[Discord] Thread created (tid=" <> T.unpack key <> "), running on-created callback..."
+  logMsg $ "[Discord] Thread created (tid=" <> key <> "), running on-created callback..."
   persistResult <- tryIO (rrOnThreadCreated key)
   case persistResult of
     Left ex ->
-      putStrLn $ "[Discord] ERROR: on-thread-created callback failed; draft not persisted: " <> displayException ex
+      logMsg $ "[Discord] ERROR: on-thread-created callback failed; draft not persisted: " <> T.pack (displayException ex)
     Right () ->
       activateReview hdl cfg rr tid key
 
@@ -366,14 +366,14 @@ createReviewThread hdl cfg ReviewRequest {..} =
 -- | Post draft files to the review thread.
 activateReview :: DiscordHandle -> DiscordConfig -> ReviewRequest -> ChannelId -> Text -> IO ()
 activateReview hdl _cfg rr tid _key = do
-  putStrLn "[Discord] Draft persisted. Posting draft bodies to thread..."
+  logMsg "[Discord] Draft persisted. Posting draft bodies to thread..."
   tryLog "[Discord] ERROR: failed to post context info" $
     restCallIO hdl (CreateMessage tid (buildContextMessage rr))
   tryLog "[Discord] ERROR: failed to post EN draft" $
     postAsFile hdl tid (emojiDraft <> " **Draft (EN):**") "draft-en.md" (rrBodyEn rr)
   tryLog "[Discord] ERROR: failed to post PT-BR draft" $
     postAsFile hdl tid (emojiDraft <> " **Draft (PT-BR):**") "draft-pt-br.md" (rrBodyPtBr rr)
-  putStrLn "[Discord] Review setup complete."
+  logMsg "[Discord] Review setup complete."
 
 -- | Handle incoming Discord events.
 --
@@ -419,7 +419,7 @@ handleThreadCreate cfg hdl chan = do
       msgResult <- runReaderT (restCall (GetChannelMessage (tid, msgId))) hdl
       case msgResult of
         Left err ->
-          putStrLn $ "[Discord] Could not fetch starter message for custom post (thread=" <> T.unpack threadId <> "): " <> show err
+          logMsg $ "[Discord] Could not fetch starter message for custom post (thread=" <> threadId <> "): " <> T.pack (show err)
         Right msg ->
           when (userId (messageAuthor msg) == dcOwnerId cfg) $ do
             -- Atomically claim the in-flight slot; skip if a generation is
@@ -510,14 +510,14 @@ registerSlashCommands appId cfg = do
   mapM_ (registerSimpleCommand appId gid) cmds
   registerSubjectCommand appId gid
   registerDisableSubjectCommand appId gid
-  liftIO $ putStrLn "[Discord] Slash commands registered."
+  liftIO $ logMsg "[Discord] Slash commands registered."
 
 -- | Register a simple slash command with no options.
 registerSimpleCommand :: ApplicationId -> GuildId -> (Text, Text) -> DiscordHandler ()
 registerSimpleCommand appId gid (name, desc) =
   case createChatInput name desc of
     Nothing ->
-      liftIO $ putStrLn $ "[Discord] WARNING: could not build slash command: " <> T.unpack name
+      liftIO $ logMsg $ "[Discord] WARNING: could not build slash command: " <> name
     Just cmd ->
       void $ restCall (CreateGuildApplicationCommand appId gid cmd)
 
@@ -526,7 +526,7 @@ registerSubjectCommand :: ApplicationId -> GuildId -> DiscordHandler ()
 registerSubjectCommand appId gid =
   case createChatInput cmdSubject "Add a new subject of interest for the blog" of
     Nothing ->
-      liftIO $ putStrLn "[Discord] WARNING: could not build subject slash command"
+      liftIO $ logMsg "[Discord] WARNING: could not build subject slash command"
     Just cmd@CreateApplicationCommandChatInput {} -> do
       let cmdWithOptions =
             cmd
@@ -548,14 +548,14 @@ registerSubjectCommand appId gid =
               }
       void $ restCall (CreateGuildApplicationCommand appId gid cmdWithOptions)
     Just _ ->
-      liftIO $ putStrLn "[Discord] WARNING: unexpected command type returned by createChatInput for subject command"
+      liftIO $ logMsg "[Discord] WARNING: unexpected command type returned by createChatInput for subject command"
 
 -- | Register the @\/disable-subject@ slash command with a required integer @id@ option.
 registerDisableSubjectCommand :: ApplicationId -> GuildId -> DiscordHandler ()
 registerDisableSubjectCommand appId gid =
   case createChatInput cmdDisableSubject "Disable a subject by ID" of
     Nothing ->
-      liftIO $ putStrLn "[Discord] WARNING: could not build disable-subject slash command"
+      liftIO $ logMsg "[Discord] WARNING: could not build disable-subject slash command"
     Just cmd@CreateApplicationCommandChatInput {} -> do
       let cmdWithOptions =
             cmd
@@ -577,7 +577,7 @@ registerDisableSubjectCommand appId gid =
               }
       void $ restCall (CreateGuildApplicationCommand appId gid cmdWithOptions)
     Just _ ->
-      liftIO $ putStrLn "[Discord] WARNING: unexpected command type returned by createChatInput for disable-subject command"
+      liftIO $ logMsg "[Discord] WARNING: unexpected command type returned by createChatInput for disable-subject command"
 
 -- | Route an incoming 'Interaction' to the appropriate slash-command handler.
 -- Commands are only processed when they originate from the configured
@@ -711,11 +711,11 @@ restCallIO hdl req = void $ runReaderT (restCall req) hdl
 -- draft in a single, easily downloadable message.
 postAsFile :: DiscordHandle -> ChannelId -> Text -> Text -> Text -> IO ()
 postAsFile hdl tid caption filename body = do
-  putStrLn $
+  logMsg $
     "[Discord] Posting "
-      <> T.unpack filename
+      <> filename
       <> " as file attachment ("
-      <> show (T.length body)
+      <> T.pack (show (T.length body))
       <> " chars)."
   let opts =
         def
@@ -724,8 +724,8 @@ postAsFile hdl tid caption filename body = do
           }
   result <- runReaderT (restCall (CreateMessageDetailed tid opts)) hdl
   case result of
-    Left err -> putStrLn $ "[Discord] Failed to post file attachment: " <> show err
-    Right _ -> putStrLn $ "[Discord] Posted " <> T.unpack filename <> "."
+    Left err -> logMsg $ "[Discord] Failed to post file attachment: " <> T.pack (show err)
+    Right _ -> logMsg $ "[Discord] Posted " <> filename <> "."
 
 -- | Format a 'ReviewRequest' as a context summary for the review thread.
 -- Shows the source content info, tags, and subjects.
@@ -772,7 +772,7 @@ activateCustomReview cfg threadId bodyEn bodyPtBr = do
     postAsFile hdl tid (emojiDraft <> " **Draft (EN):**") "draft-en.md" bodyEn
   tryLog "[Discord] ERROR: failed to post PT-BR draft" $
     postAsFile hdl tid (emojiDraft <> " **Draft (PT-BR):**") "draft-pt-br.md" bodyPtBr
-  putStrLn "[Discord] Custom review activated."
+  logMsg "[Discord] Custom review activated."
 
 -- | Parse a Discord thread ID (as 'Text') into a 'ChannelId'.
 parseThreadId :: Text -> ChannelId

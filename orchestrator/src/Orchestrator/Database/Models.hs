@@ -8,6 +8,7 @@ module Orchestrator.Database.Models
     InterestScore,
     mkInterestScore,
     unInterestScore,
+    defaultInterestScore,
   )
 where
 
@@ -154,6 +155,12 @@ mkInterestScore :: Int -> Either Text InterestScore
 mkInterestScore n
   | n >= 1 && n <= 5 = Right (InterestScore n)
   | otherwise = Left $ "InterestScore must be between 1 and 5, got: " <> pack (show n)
+
+-- | The default 'InterestScore' of 3 assigned to newly created subjects.
+-- Avoids a partial 'error' call at construction sites; safe because 3 is
+-- always within the valid range 1–5.
+defaultInterestScore :: InterestScore
+defaultInterestScore = InterestScore 3
 
 instance PersistField InterestScore where
   toPersistValue = toPersistValue . unInterestScore

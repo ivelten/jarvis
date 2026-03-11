@@ -9,7 +9,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Client (defaultManagerSettings, newManager)
-import Orchestrator.AI.Client
+import Orchestrator.AI.Client.Internal
 import Orchestrator.TextUtils (splitTitle, toSlug)
 import Test.Hspec
 

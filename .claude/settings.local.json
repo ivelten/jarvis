@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /Users/ivelten/Repos/jarvis/orchestrator/src/Orchestrator/**/*.hs)",
+      "Bash(grep -n \"TODO\\\\|FIXME\\\\|BUG\\\\|HACK\" /Users/ivelten/Repos/jarvis/orchestrator/src/Orchestrator/**/*.hs)"
+    ]
+  }
+}

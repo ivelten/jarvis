@@ -8,12 +8,12 @@ description:
   and GitOps deployment to a Hugo-based GitHub Pages site.
 
 license: Apache-2.0
-license-file: ../LICENSE
+license-file: LICENSE
 author: Jarvis
 maintainer: you@example.com
 category: Application
 build-type: Simple
-extra-doc-files: ../CHANGELOG.md
+extra-doc-files: CHANGELOG.md
 extra-source-files:
   prompts/*.txt
   sql/constraints/*.sql
@@ -48,6 +48,7 @@ library
   hs-source-dirs: src
   exposed-modules:
     Orchestrator.AI.Client
+    Orchestrator.AI.Client.Internal
     Orchestrator.Database.Connection
     Orchestrator.Database.Entities
     Orchestrator.Database.Migrations

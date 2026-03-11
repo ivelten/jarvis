@@ -7,6 +7,7 @@ import Control.Exception (SomeException, displayException, try)
 import qualified Data.ByteString.Char8 as BC
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
+import Data.Word (Word64)
 import qualified Data.Text as T
 import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
@@ -47,13 +48,13 @@ data Config = Config
     -- | Discord bot token (without the @Bot @ prefix).
     cfgDcBotToken :: !Text,
     -- | Discord guild (server) ID where the review channel lives.
-    cfgDcGuildId :: !Int,
+    cfgDcGuildId :: !Word64,
     -- | Discord channel ID where draft review messages are posted.
-    cfgDcChannelId :: !Int,
+    cfgDcChannelId :: !Word64,
     -- | Discord text channel ID used for slash commands and bot notices.
-    cfgDcInteractionChannelId :: !Int,
+    cfgDcInteractionChannelId :: !Word64,
     -- | Discord user ID of the bot owner (only this user's interactions are processed).
-    cfgDcOwnerId :: !Integer,
+    cfgDcOwnerId :: !Word64,
     -- | How often to run the discovery step, in seconds (default: 86400 = 1 day).
     cfgDiscoveryIntervalSecs :: !Int,
     -- | How often to run the draft-generation step, in seconds (default: 43200 = 12 hours).
@@ -159,6 +160,10 @@ main = do
   migrateDatabase pool
   putStrLn "[Jarvis] Database ready."
 
+  -- RecursiveDo is needed here because 'dcCfg' depends on 'pipeEnv'
+  -- (callbacks are bound as 'pipeEnv' closures) while 'pipeEnv' depends on
+  -- 'dcCfg'.  The 'rec' block threads the knot via lazy evaluation of the
+  -- 'let' binding, so both values are available by the time IO actions run.
   rec dcCfg <-
         mkDiscordConfig
           DiscordBotSettings
