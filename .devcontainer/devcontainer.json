@@ -2,7 +2,7 @@
   "name": "Jarvis Haskell Development",
   "dockerComposeFile": "docker-compose.yml",
   "service": "app",
-  "workspaceFolder": "/workspaces/jarvis",
+  "workspaceFolder": "/workspaces/haskell",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -15,7 +15,9 @@
         "mtxr.sqltools",
         "mtxr.sqltools-driver-pg",
         "yzhang.markdown-all-in-one",
-        "davidanson.vscode-markdownlint"
+        "davidanson.vscode-markdownlint",
+        "Anthropic.claude-code",
+        "phoityne.phoityne-vscode"
       ],
       "settings": {
         "haskell.manageHLS": "GHCup",
@@ -29,8 +31,8 @@
   "forwardPorts": [
     5432
   ],
-  "postCreateCommand": ".devcontainer/post-create.sh",
   "remoteUser": "vscode",
+  "postStartCommand": "bash .devcontainer/direnv-setup.sh",
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {
       "installZsh": true,

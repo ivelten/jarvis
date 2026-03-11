@@ -103,7 +103,7 @@ spec = do
         `shouldBe` Left "Invalid PostgreSQL array format: not an array"
 
   describe "InterestScore" $ do
-    it "accepts all values in range 1–5" $
+    it "accepts all values in range 1-5" $
       map (fmap unInterestScore . mkInterestScore) [1 .. 5]
         `shouldBe` map Right [1 .. 5]
 

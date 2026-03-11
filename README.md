@@ -211,12 +211,3 @@ All configuration is read from environment variables. See `.env.example` for the
 | `DISCOVERY_INTERVAL_SECS` | | `86400` | Seconds to sleep between discovery runs (first run also delayed) |
 | `DRAFT_INTERVAL_SECS` | | `43200` | Seconds to sleep between draft-generation runs (first run also delayed) |
 | `RETRY_INTERVAL_SECS` | | `3600` | Seconds to sleep between publish-retry runs. The retry worker re-attempts any draft in the `publish_failed` state without generating a new draft or losing the approved content. |
-
-## Running the tests
-
-```bash
-cd orchestrator
-cabal test
-```
-
-The test suite does not require a live database, Discord connection, or Gemini account — all external dependencies are faked in-process.
