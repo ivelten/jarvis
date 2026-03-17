@@ -55,6 +55,7 @@ library
     Orchestrator.Database.Models
     Orchestrator.Database.TH
     Orchestrator.Discord.Bot
+    Orchestrator.Error
     Orchestrator.GitHub.Client
     Orchestrator.IOUtils
     Orchestrator.Pipeline

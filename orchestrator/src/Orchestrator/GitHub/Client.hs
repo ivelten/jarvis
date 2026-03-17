@@ -11,14 +11,17 @@ module Orchestrator.GitHub.Client
   )
 where
 
+import Control.Exception (throwIO)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Base64 as B64
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.HTTP.Client
 import Network.HTTP.Types (RequestHeaders, status404, statusCode)
+import Orchestrator.Error (AppError (..))
 import Orchestrator.TextUtils (emojiDraft)
 
 -- ---------------------------------------------------------------------------
@@ -173,11 +176,10 @@ commitPost cfg title filename content = do
   if statusCode sc `elem` [200, 201]
     then pure ()
     else
-      ioError . userError $
-        "GitHub commitPost failed ("
-          <> show (statusCode sc)
-          <> "): "
-          <> show (responseBody resp)
+      throwIO $
+        GitHubCommitError
+          (statusCode sc)
+          (TE.decodeUtf8 (LBS.toStrict (responseBody resp)))
 
 -- | Trigger a GitHub Actions workflow dispatch to rebuild the Hugo site.
 --
@@ -209,8 +211,7 @@ triggerDeploy cfg@GitHubConfig {..} = do
   if sc == 204
     then pure ()
     else
-      ioError . userError $
-        "GitHub triggerDeploy failed ("
-          <> show sc
-          <> "): "
-          <> show (responseBody resp)
+      throwIO $
+        GitHubDeployError
+          sc
+          (TE.decodeUtf8 (LBS.toStrict (responseBody resp)))

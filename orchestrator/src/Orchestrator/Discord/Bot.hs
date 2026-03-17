@@ -644,7 +644,14 @@ dispatchSlashCommand cfg intr cmdName = do
         (interactionId intr)
         (interactionToken intr)
         (interactionResponseBasic reply)
-  liftIO $ void $ forkIO $ tryLog (logPrefix <> " slash command error") action
+  liftIO $ void $ forkIO $ do
+    result <- tryIO action
+    case result of
+      Right () -> pure ()
+      Left ex -> do
+        let errMsg = T.pack (displayException ex)
+        logMsg $ logPrefix <> " slash command error: " <> errMsg
+        sendInteractionMessage cfg $ emojiWarning <> " **Command failed:** " <> errMsg
 
 -- | Extract a named string option value from an interaction's option data.
 extractStringOption :: Text -> Interaction -> Maybe Text

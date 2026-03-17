@@ -12,18 +12,15 @@ module Orchestrator.AI.Client
     generateDraft,
     generateCustomDraft,
     reviseDraft,
-    isRateLimitError,
-    isFallbackError,
     tryModelsInOrder,
   )
 where
 
-import Control.Exception (SomeException, displayException, throwIO, try)
+import Control.Exception (throwIO)
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseMaybe)
 import qualified Data.ByteString.Lazy as LBS
 import Data.FileEmbed (embedFile, makeRelativeToProject)
-import Data.List (isInfixOf)
 import Data.Maybe (catMaybes, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -42,7 +39,8 @@ import Network.HTTP.Client
   )
 import Network.HTTP.Types (statusCode)
 import Orchestrator.AI.Client.Internal
-import Orchestrator.IOUtils (logMsg)
+import Orchestrator.Error (AppError (..), tryAppError)
+import Orchestrator.IOUtils (logMsg, tryIO)
 import Orchestrator.TextUtils (splitTitle, toSlug)
 
 -- ---------------------------------------------------------------------------
@@ -148,40 +146,24 @@ postGemini cfg model body = do
           }
   responseBody <$> httpLbs req (aiManager cfg)
 
--- | Returns 'True' when the exception indicates a Gemini rate-limit error
--- (HTTP 429 or RESOURCE_EXHAUSTED).  Used by 'tryModelsInOrder' to decide
--- whether to fall through to the next model.
-isRateLimitError :: SomeException -> Bool
-isRateLimitError ex =
-  let msg = displayException ex
-   in "429" `isInfixOf` msg || "RESOURCE_EXHAUSTED" `isInfixOf` msg
-
--- | Returns 'True' for any transient Gemini error that warrants falling
--- through to the next model: rate limits and empty responses.
--- An empty response (finishReason=STOP with no text) can occur when a
--- model does not fully support grounded search; a more capable model in
--- the priority list should succeed.
-isFallbackError :: SomeException -> Bool
-isFallbackError ex =
-  isRateLimitError ex
-    || "could not extract text from response" `isInfixOf` displayException ex
-
 -- | Try each model from the priority list in order, falling through to the
--- next model on any transient error detected by 'isFallbackError'
--- (rate limits and empty/unsupported responses).
--- Raises an 'IOError' when all models are exhausted or a non-transient error
--- occurs.
+-- next model on rate-limit ('AiRateLimit') or empty-response ('AiEmptyResponse')
+-- errors.  Any other 'AppError' or non-'AppError' exception is re-thrown
+-- immediately.  Raises 'AiApiError' when all models are exhausted.
 tryModelsInOrder :: [Text] -> (Text -> IO a) -> IO a
-tryModelsInOrder [] _ = ioError (userError "Gemini: all configured models failed or are rate-limited")
+tryModelsInOrder [] _ = throwIO (AiApiError "Gemini: all configured models failed or are rate-limited")
 tryModelsInOrder (model : rest) action = do
-  result <- try (action model)
+  result <- tryAppError (action model)
   case result of
     Right v -> pure v
-    Left ex
-      | isFallbackError ex -> do
-          logMsg $ "[AI] Model " <> model <> " unavailable (" <> T.pack (displayException (ex :: SomeException)) <> "), trying next..."
-          tryModelsInOrder rest action
-      | otherwise -> throwIO (ex :: SomeException)
+    Left ex -> case ex of
+      AiRateLimit _ -> fallback ex
+      AiEmptyResponse _ -> fallback ex
+      _ -> throwIO ex
+  where
+    fallback ex = do
+      logMsg $ "[AI] Model " <> model <> " unavailable (" <> T.pack (show ex) <> "), trying next..."
+      tryModelsInOrder rest action
 
 -- | Call Gemini with a specific model and return the extracted text and total
 -- token count, raising an 'IOError' on HTTP errors, API error responses, or
@@ -190,14 +172,14 @@ callGeminiWith :: AiConfig -> Text -> Value -> IO (Text, Int)
 callGeminiWith cfg model body = do
   respBody <- postGemini cfg model body
   case eitherDecode respBody of
-    Left err -> ioError (userError $ "Gemini HTTP response parse error: " <> err)
+    Left err -> throwIO (AiApiError $ "Gemini HTTP response parse error: " <> T.pack err)
     Right v -> do
       checkGeminiError v
       case extractText v of
         Nothing ->
-          ioError . userError $
-            "Gemini: could not extract text from response"
-              <> maybe "" (\r -> " (finishReason=" <> T.unpack r <> ")") (extractFinishReason v)
+          throwIO $ AiEmptyResponse $
+            "could not extract text from response"
+              <> maybe "" (\r -> " (finishReason=" <> r <> ")") (extractFinishReason v)
         Just txt -> pure (txt, extractTokenCount v)
 
 -- | POST a request body to Gemini, trying models from 'aiModels' in priority
@@ -221,24 +203,27 @@ userContents prompt =
 decodeText :: (FromJSON a) => Text -> IO a
 decodeText t =
   case eitherDecode (LBS.fromStrict (TE.encodeUtf8 t)) of
-    Left err -> ioError (userError $ "JSON decode error: " <> err)
+    Left err -> throwIO (AiApiError $ "JSON decode error: " <> T.pack err)
     Right v -> pure v
 
 -- | If the Gemini response contains a top-level @{"error": ...}@ object,
--- throw an 'IOError' with the API error code and message so callers get
--- a useful diagnosis (e.g. 429 quota exhausted) instead of a generic
--- "could not extract text" failure.
+-- throw a typed 'AppError': 'AiRateLimit' for HTTP 429 \/ RESOURCE_EXHAUSTED,
+-- 'AiApiError' for everything else.
 checkGeminiError :: Value -> IO ()
 checkGeminiError v =
   case parseMaybe extractError v of
     Nothing -> pure ()
-    Just msg -> ioError (userError $ "Gemini API error: " <> T.unpack msg)
+    Just (code, msg)
+      | code == 429 || "RESOURCE_EXHAUSTED" `T.isInfixOf` msg ->
+          throwIO (AiRateLimit msg)
+      | otherwise ->
+          throwIO (AiApiError $ "HTTP " <> T.pack (show code) <> " \x2014 " <> msg)
   where
     extractError = withObject "GeminiResponse" $ \o -> do
       errObj <- o .: "error"
       code <- errObj .: "code" :: Parser Int
       msg <- errObj .: "message"
-      pure $ "HTTP " <> T.pack (show code) <> " — " <> msg
+      pure (code, msg)
 
 -- | Strip markdown code fences that Gemini sometimes wraps around JSON output.
 -- Handles both @```json\n...\n```@ and bare @```\n...\n```@.
@@ -273,7 +258,7 @@ defaultGenerationConfig =
 -- broken URL does not abort the whole discovery batch.
 checkUrl :: Manager -> Text -> IO Bool
 checkUrl mgr url = do
-  result <- (try :: IO Int -> IO (Either SomeException Int)) $ do
+  result <- tryIO $ do
     req <- parseRequest (T.unpack url)
     resp <- httpLbs req mgr
     pure $ statusCode (responseStatus resp)

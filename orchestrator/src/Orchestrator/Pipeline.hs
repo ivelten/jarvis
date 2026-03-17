@@ -30,7 +30,7 @@ module Orchestrator.Pipeline
   )
 where
 
-import Control.Exception (SomeException, displayException)
+import Control.Exception (SomeException, displayException, throwIO)
 import Control.Monad (forM_)
 import Data.Int (Int64)
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
@@ -59,6 +59,7 @@ import Orchestrator.Database.Models
   )
 import Orchestrator.Discord.Bot (ApproveReviewEvent (..), CustomPostRequestEvent (..), DisableSubjectCommandEvent (..), DiscordConfig, RejectReviewEvent (..), ReviewRequest (..), ReviseReviewEvent (..), RevisionResult (..), SubjectCommandEvent (..), activateCustomReview, closeThread, registerForReview, sendInteractionFile, sendInteractionMessage, sendThreadMessage)
 import Orchestrator.GitHub.Client (GitHubConfig, commitPost, triggerDeploy)
+import Orchestrator.Error (tryAppError)
 import Orchestrator.IOUtils (logMsg, tryIO)
 import Orchestrator.Posts.Generator (HugoPostMeta (..), renderHugoPost)
 import Orchestrator.TextUtils (emojiApprove, emojiDraft, emojiQueue, emojiReject, emojiSearch, emojiStar, emojiWarning, splitTitle, toSlug, truncateText)
@@ -210,7 +211,7 @@ handleReviseRequest env@PipelineEnv {..} ReviseReviewEvent {..} = do
           bodyPtBr = fromMaybe "" (postDraftContentMarkdownPtBr pd)
       insertComment env pdKey CommentAuthorUser rvsFeedback
       result <-
-        tryIO (reviseDraft pipeAiCfg ReviseRequest {rvBodyEn = bodyEn, rvBodyPtBr = bodyPtBr, rvFeedback = rvsFeedback})
+        tryAppError (reviseDraft pipeAiCfg ReviseRequest {rvBodyEn = bodyEn, rvBodyPtBr = bodyPtBr, rvFeedback = rvsFeedback})
       case result of
         Left ex -> do
           let errMsg = T.pack (displayException ex)
@@ -443,7 +444,7 @@ onCommitFailure PipelineEnv {..} draftKey ex = do
   runDb pipeDbPool $
     update draftKey [PostDraftStatus =. DraftPublishFailed, PostDraftUpdatedAt =. failedAt]
   logMsg $ "[Drafts] Commit failed; marked as publish_failed. Error: " <> T.pack (displayException ex)
-  ioError (userError (displayException ex))
+  throwIO ex
 
 -- | Handle a successful commit: persist published state then trigger deploy.
 onCommitSuccess :: PipelineEnv -> PublishDraftRequest -> RenderedDraft -> IO ()
