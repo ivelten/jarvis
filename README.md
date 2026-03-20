@@ -1,5 +1,7 @@
 # Jarvis
 
+> **Note:** This is a vibe coded project for personal experience.
+
 A high-reliability orchestration engine that bridges the gap between .NET expertise and functional programming mastery through AI-assisted technical content delivery.
 
 ## Overview
